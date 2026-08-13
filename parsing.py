@@ -3,8 +3,120 @@ For each format, this code extracts the largest HTML table from the response.
 """
 
 import json
+import html
+import re
 from typing import Any
 import os
+
+
+def _extract_html_table(markdown: str) -> str | None:
+    tables = re.findall(
+        r"<table\b[^>]*>.*?</table>",
+        markdown,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if tables:
+        return max(tables, key=len)
+
+    blocks: list[list[str]] = []
+    current: list[str] = []
+    for line in markdown.splitlines():
+        if "|" in line:
+            current.append(line.strip())
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    candidates = [
+        block
+        for block in blocks
+        if len(block) >= 2
+        and re.fullmatch(
+            r"\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*",
+            block[1],
+        )
+    ]
+    if not candidates:
+        return None
+
+    rows: list[str] = []
+    for row_index, line in enumerate(max(candidates, key=len)):
+        if row_index == 1:
+            continue
+        cells = [html.escape(cell.strip()) for cell in line.strip("|").split("|")]
+        tag = "th" if row_index == 0 else "td"
+        rows.append("<tr>" + "".join(f"<{tag}>{cell}</{tag}>" for cell in cells) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
+
+def _azure_content_understanding_table_to_html(table: dict[str, Any]) -> str:
+    row_count = int(table.get("rowCount", 0))
+    column_count = int(table.get("columnCount", 0))
+    if row_count <= 0 or column_count <= 0:
+        raise ValueError("Azure Content Understanding returned invalid table dimensions.")
+    origins: dict[tuple[int, int], dict[str, Any]] = {}
+    covered: set[tuple[int, int]] = set()
+    for cell in table.get("cells", []):
+        row = int(cell.get("rowIndex", 0))
+        column = int(cell.get("columnIndex", 0))
+        row_span = int(cell.get("rowSpan", 1))
+        column_span = int(cell.get("columnSpan", 1))
+        origins[(row, column)] = cell
+        for covered_row in range(row, min(row + row_span, row_count)):
+            for covered_column in range(column, min(column + column_span, column_count)):
+                if (covered_row, covered_column) != (row, column):
+                    covered.add((covered_row, covered_column))
+
+    rows: list[str] = []
+    for row in range(row_count):
+        rendered_cells: list[str] = []
+        column = 0
+        while column < column_count:
+            if (row, column) in covered:
+                column += 1
+                continue
+            cell = origins.get((row, column))
+            if cell is None:
+                rendered_cells.append("<td></td>")
+                column += 1
+                continue
+            row_span = int(cell.get("rowSpan", 1))
+            column_span = int(cell.get("columnSpan", 1))
+            tag = "th" if "header" in str(cell.get("kind", "")).lower() else "td"
+            attributes = ""
+            if row_span > 1:
+                attributes += f' rowspan="{row_span}"'
+            if column_span > 1:
+                attributes += f' colspan="{column_span}"'
+            content = html.escape(str(cell.get("content", "")))
+            rendered_cells.append(f"<{tag}{attributes}>{content}</{tag}>")
+            column += column_span
+        rows.append("<tr>" + "".join(rendered_cells) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
+
+def parse_azure_content_understanding_response(path: str) -> tuple[str | None, Any]:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    contents = data.get("contents", [])
+    tables = [table for content in contents for table in content.get("tables", [])]
+    if tables:
+        largest = max(
+            tables,
+            key=lambda table: int(table.get("rowCount", 0))
+            * int(table.get("columnCount", 0)),
+        )
+        return _azure_content_understanding_table_to_html(largest), data
+    markdown = "\n\n".join(str(content.get("markdown", "")) for content in contents)
+    return _extract_html_table(markdown), data
+
+
+def parse_mistral_ocr_response(path: str) -> tuple[str | None, Any]:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    markdown = "\n\n".join(str(page.get("markdown", "")) for page in data.get("pages", []))
+    return _extract_html_table(markdown), data
 
 
 def parse_textract_response(path: str) -> tuple[str | None, Any]:
