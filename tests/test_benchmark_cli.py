@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from unittest.mock import Mock
 
 UPSTREAM_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(UPSTREAM_ROOT))
@@ -17,6 +18,7 @@ from parsing import (  # noqa: E402
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
 )
+from providers.mistral_ocr import process  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
@@ -74,6 +76,24 @@ class ParsingTests(unittest.TestCase):
             "<table><tr><th>A</th><th>B</th></tr>"
             "<tr><td>1</td><td>2</td></tr></table>",
         )
+
+    def test_mistral_retries_using_azure_retry_after_ms(self):
+        class RateLimitError(RuntimeError):
+            status_code = 429
+            headers = {"retry-after-ms": "5000"}
+
+        response = object()
+        client = Mock()
+        client.ocr.process.side_effect = [RateLimitError(), response]
+        with patch("providers.mistral_ocr.time.sleep") as sleep:
+            actual = process(
+                client,
+                "mistral-ocr-4-0",
+                {"type": "document_url", "document_url": "data:application/pdf;base64,"},
+            )
+
+        self.assertIs(actual, response)
+        sleep.assert_called_once_with(5.0)
 
 
 class BenchmarkCliTests(unittest.TestCase):
