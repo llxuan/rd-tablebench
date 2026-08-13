@@ -109,12 +109,15 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
             "provider": args.provider,
             "parallel": args.parallel,
             "analyzer_id": args.analyzer_id,
+            "input_mode": args.input_mode,
         }
     return {
         "provider": args.provider,
         "parallel": args.parallel,
         "mistral_provider": args.mistral_provider,
         "model": args.mistral_model,
+        "input_mode": args.input_mode,
+        "table_format": args.mistral_table_format,
     }
 
 
@@ -133,11 +136,17 @@ def _validate_environment(args: argparse.Namespace) -> None:
 
 def _analyzer(args: argparse.Namespace) -> Callable[[Path], dict[str, Any]]:
     if args.provider == "azure-cu":
-        return lambda path: analyze_azure_cu(path, args.analyzer_id)
+        return lambda path: analyze_azure_cu(
+            path,
+            args.analyzer_id,
+            args.input_mode,
+        )
     return lambda path: analyze_mistral(
         path,
         args.mistral_provider,
         args.mistral_model,
+        args.input_mode,
+        args.mistral_table_format,
     )
 
 
@@ -147,14 +156,27 @@ def _parser(provider: str) -> Callable[[str], tuple[str | None, Any]]:
     return parse_mistral_ocr_response
 
 
-def _error_record(case: Case, status: str, error: Exception) -> dict[str, object]:
+def _case_input(case: Case, input_mode: str) -> str:
+    if input_mode == "pdf":
+        return case.pdf
+    if input_mode == "image":
+        return case.image
+    raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
+
+
+def _error_record(
+    case: Case,
+    status: str,
+    error: Exception,
+    source: str,
+) -> dict[str, object]:
     return {
         "case_id": case.id,
         "score": None,
         "aggregate_contribution": 0.0,
         "status": status,
         "language": case.language,
-        "source": case.pdf,
+        "source": source,
         "preview": case.image,
         "output": None,
         "error": {"type": type(error).__name__, "message": str(error)},
@@ -191,7 +213,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     parse = _parser(args.provider)
 
     def process(case: Case) -> dict[str, object]:
-        input_path = dataset_root / case.pdf
+        source = _case_input(case, args.input_mode)
+        input_path = dataset_root / source
         ground_truth_path = dataset_root / case.ground_truth
         output_path = outputs_dir / f"{case.id}.html"
         raw_path = raw_dir / f"{case.id}.json"
@@ -216,7 +239,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             raw = analyze(input_path)
             _write_json(raw_path, raw)
         except Exception as error:  # Provider SDKs expose different error hierarchies.
-            result = _error_record(case, "inference_error", error)
+            result = _error_record(case, "inference_error", error, source)
             _write_json(
                 status_path,
                 {
@@ -247,7 +270,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "aggregate_contribution": score,
                 "status": "scored",
                 "language": case.language,
-                "source": case.pdf,
+                "source": source,
                 "preview": case.image,
                 "output": f"outputs/{case.id}.html",
             }
@@ -269,7 +292,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             return result
         except Exception as error:  # Parsing and native evaluator failures are distinct.
-            result = _error_record(case, "evaluation_error", error)
+            result = _error_record(case, "evaluation_error", error, source)
             result["output"] = (
                 f"outputs/{case.id}.html" if output_path.is_file() else None
             )
@@ -352,9 +375,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--output-root", required=True)
     run_parser.add_argument("--provider", choices=("azure-cu", "mistral"), required=True)
     run_parser.add_argument("--parallel", type=int, default=1)
+    run_parser.add_argument("--input-mode", choices=("pdf", "image"), default="pdf")
     run_parser.add_argument("--analyzer-id", default="prebuilt-layout")
     run_parser.add_argument("--mistral-provider", choices=("azure", "mistral"), default="azure")
     run_parser.add_argument("--mistral-model", default="mistral-ocr-4-0")
+    run_parser.add_argument(
+        "--mistral-table-format",
+        choices=("inline", "markdown", "html"),
+        default="inline",
+    )
     return parser
 
 

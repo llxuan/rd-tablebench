@@ -21,13 +21,23 @@ def retry_delay(error: Exception, attempt: int) -> float:
     return min(2**attempt, 30)
 
 
-def process(client: Any, model: str, document: dict[str, str]) -> Any:
+def process(
+    client: Any,
+    model: str,
+    document: dict[str, str],
+    table_format: str | None = None,
+) -> Any:
     for attempt in range(20):
         try:
+            options: dict[str, Any] = {
+                "model": model,
+                "document": document,
+                "timeout_ms": int(os.environ.get("MISTRAL_TIMEOUT_MS", "180000")),
+            }
+            if table_format is not None:
+                options["table_format"] = table_format
             return client.ocr.process(
-                model=model,
-                document=document,
-                timeout_ms=int(os.environ.get("MISTRAL_TIMEOUT_MS", "180000")),
+                **options,
             )
         except Exception as error:
             status_code = getattr(error, "status_code", None)
@@ -37,8 +47,28 @@ def process(client: Any, model: str, document: dict[str, str]) -> Any:
     raise RuntimeError("Mistral OCR exhausted its retry budget.")
 
 
-def analyze(pdf_path: Path, provider: str, model: str) -> dict[str, Any]:
-    """Analyze one released PDF and return the JSON-serializable raw response."""
+def input_document(input_path: Path, input_mode: str) -> dict[str, str]:
+    encoded = base64.b64encode(input_path.read_bytes()).decode("ascii")
+    if input_mode == "pdf":
+        media_type = "application/pdf"
+    elif input_mode == "image":
+        media_type = "image/jpeg"
+    else:
+        raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
+    return {
+        "type": "document_url",
+        "document_url": f"data:{media_type};base64,{encoded}",
+    }
+
+
+def analyze(
+    input_path: Path,
+    provider: str,
+    model: str,
+    input_mode: str,
+    table_format: str,
+) -> dict[str, Any]:
+    """Analyze one released PDF or JPG and return the raw response."""
     api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         raise RuntimeError("MISTRAL_API_KEY is required.")
@@ -58,14 +88,11 @@ def analyze(pdf_path: Path, provider: str, model: str) -> dict[str, Any]:
     else:
         raise ValueError(f"Unsupported Mistral provider: {provider}")
 
-    encoded = base64.b64encode(pdf_path.read_bytes()).decode("ascii")
     response = process(
         client,
         model,
-        {
-            "type": "document_url",
-            "document_url": f"data:application/pdf;base64,{encoded}",
-        },
+        input_document(input_path, input_mode),
+        None if table_format == "inline" else table_format,
     )
     raw = response.model_dump(mode="json")
     if not isinstance(raw, dict):

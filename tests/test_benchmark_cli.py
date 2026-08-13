@@ -18,7 +18,8 @@ from parsing import (  # noqa: E402
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
 )
-from providers.mistral_ocr import process  # noqa: E402
+from providers.azure_content_understanding import input_content_type  # noqa: E402
+from providers.mistral_ocr import input_document, process  # noqa: E402
 
 
 class ParsingTests(unittest.TestCase):
@@ -77,6 +78,52 @@ class ParsingTests(unittest.TestCase):
             "<tr><td>1</td><td>2</td></tr></table>",
         )
 
+    def test_parses_all_ordered_mistral_html_table_fragments(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._write_json(
+                Path(directory),
+                {
+                    "pages": [
+                        {
+                            "markdown": "[tbl-0.html](tbl-0.html)",
+                            "tables": [
+                                {
+                                    "format": "html",
+                                    "content": "<table><tr><td>A</td></tr></table>",
+                                },
+                                {
+                                    "format": "html",
+                                    "content": "<table><tr><td>B</td></tr></table>",
+                                },
+                            ],
+                        }
+                    ]
+                },
+            )
+            table, _ = parse_mistral_ocr_response(str(path))
+
+        self.assertEqual(
+            table,
+            "<table><tr><td>A</td></tr></table>\n"
+            "<table><tr><td>B</td></tr></table>",
+        )
+
+    def test_provider_input_contracts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pdf = root / "case.pdf"
+            image = root / "case.jpg"
+            pdf.write_bytes(b"pdf")
+            image.write_bytes(b"jpg")
+
+            pdf_document = input_document(pdf, "pdf")
+            image_document = input_document(image, "image")
+
+        self.assertEqual(input_content_type("pdf"), "application/pdf")
+        self.assertEqual(input_content_type("image"), "image/jpeg")
+        self.assertTrue(pdf_document["document_url"].startswith("data:application/pdf;base64,"))
+        self.assertTrue(image_document["document_url"].startswith("data:image/jpeg;base64,"))
+
     def test_mistral_retries_using_azure_retry_after_ms(self):
         class RateLimitError(RuntimeError):
             status_code = 429
@@ -90,9 +137,11 @@ class ParsingTests(unittest.TestCase):
                 client,
                 "mistral-ocr-4-0",
                 {"type": "document_url", "document_url": "data:application/pdf;base64,"},
+                "html",
             )
 
         self.assertIs(actual, response)
+        self.assertEqual(client.ocr.process.call_args.kwargs["table_format"], "html")
         sleep.assert_called_once_with(5.0)
 
 
@@ -128,6 +177,8 @@ class BenchmarkCliTests(unittest.TestCase):
             analyzer_id="prebuilt-layout",
             mistral_provider="azure",
             mistral_model="mistral-ocr-4-0",
+            input_mode="pdf",
+            mistral_table_format="inline",
         )
 
     def test_run_scores_and_resumes_matching_case(self):
@@ -158,6 +209,36 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertEqual(first["score"], 100.0)
         self.assertEqual(second["score"], 100.0)
         self.assertEqual(results[0]["status"], "scored")
+
+    def test_input_mode_changes_source_and_prevents_cross_mode_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self._args(self._dataset(root), root / "output")
+            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
+            ):
+                benchmark_cli.run(args)
+
+            args.input_mode = "image"
+            observed: list[Path] = []
+
+            def analyze(path: Path) -> dict[str, object]:
+                observed.append(path)
+                return raw
+
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=analyze),
+            ):
+                benchmark_cli.run(args)
+            result = json.loads(
+                (root / "output/evaluation/results.jsonl").read_text().splitlines()[0]
+            )
+
+        self.assertEqual([path.name for path in observed], ["case.jpg"])
+        self.assertEqual(result["source"], "_images/case.jpg")
 
     def test_provider_failure_is_not_a_scored_zero(self):
         with tempfile.TemporaryDirectory() as directory:

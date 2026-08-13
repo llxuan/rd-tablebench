@@ -1,6 +1,4 @@
-"""
-For each format, this code extracts the largest HTML table from the response.
-"""
+"""Normalize provider responses into HTML consumed by the native evaluator."""
 
 import json
 import html
@@ -115,6 +113,18 @@ def parse_azure_content_understanding_response(path: str) -> tuple[str | None, A
 def parse_mistral_ocr_response(path: str) -> tuple[str | None, Any]:
     with open(path, "r", encoding="utf-8") as handle:
         data = json.load(handle)
+    html_tables = [
+        str(table.get("content", "")).strip()
+        for page in data.get("pages", [])
+        for table in page.get("tables", [])
+        if str(table.get("format", "")).lower() == "html"
+        and str(table.get("content", "")).strip()
+    ]
+    if html_tables:
+        # Each benchmark case contains one logical table. Mistral may split that
+        # table into ordered fragments, so retain all fragments for native row
+        # alignment instead of dropping every fragment except the largest.
+        return "\n".join(html_tables), data
     markdown = "\n\n".join(str(page.get("markdown", "")) for page in data.get("pages", []))
     return _extract_html_table(markdown), data
 

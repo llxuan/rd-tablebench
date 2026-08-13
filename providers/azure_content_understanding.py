@@ -7,8 +7,16 @@ from pathlib import Path
 from typing import Any
 
 
-def analyze(pdf_path: Path, analyzer_id: str) -> dict[str, Any]:
-    """Analyze one released PDF and return the JSON-serializable raw response."""
+def input_content_type(input_mode: str) -> str:
+    if input_mode == "pdf":
+        return "application/pdf"
+    if input_mode == "image":
+        return "image/jpeg"
+    raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
+
+
+def analyze(input_path: Path, analyzer_id: str, input_mode: str) -> dict[str, Any]:
+    """Analyze one released PDF or JPG and return the raw response."""
     from azure.ai.contentunderstanding import ContentUnderstandingClient
     from azure.core.credentials import AzureKeyCredential
 
@@ -22,7 +30,8 @@ def analyze(pdf_path: Path, analyzer_id: str) -> dict[str, Any]:
     client = ContentUnderstandingClient(endpoint, AzureKeyCredential(key))
     result = client.begin_analyze_binary(
         analyzer_id=analyzer_id,
-        binary_input=pdf_path.read_bytes(),
+        binary_input=input_path.read_bytes(),
+        content_type=input_content_type(input_mode),
     ).result()
     raw = result.as_dict()
     if not isinstance(raw, dict):
