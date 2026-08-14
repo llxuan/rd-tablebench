@@ -9,13 +9,20 @@ import json
 import os
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from convert import html_to_numpy
-from grading import table_similarity
+from metric_tracks import (
+    EVALUATION_POLICY,
+    METRIC_KEYS,
+    OUTPUT_KEYS,
+    PRIMARY_METRIC_KEY,
+    build_metric_outputs,
+    score_metric_outputs,
+)
 from parsing import (
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
@@ -31,6 +38,29 @@ class Case:
     image: str
     ground_truth: str
     language: str
+
+
+def _evaluation_revision() -> str:
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for name in (
+        "benchmark_cli.py",
+        "convert.py",
+        "formula_text.py",
+        "grading.py",
+        "html_normalization.py",
+        "metric_tracks.py",
+        "teds_struct.py",
+        "text_normalization.py",
+    ):
+        path = root / name
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+EVALUATION_REVISION = _evaluation_revision()
 
 
 def _sha256_file(path: Path) -> str:
@@ -110,6 +140,7 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
             "parallel": args.parallel,
             "analyzer_id": args.analyzer_id,
             "input_mode": args.input_mode,
+            "evaluation_policy": args.evaluation_policy,
         }
     return {
         "provider": args.provider,
@@ -118,7 +149,15 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
         "model": args.mistral_model,
         "input_mode": args.input_mode,
         "table_format": args.mistral_table_format,
+        "evaluation_policy": args.evaluation_policy,
     }
+
+
+def _provider_configuration(args: argparse.Namespace) -> dict[str, object]:
+    configuration = _configuration(args).copy()
+    configuration.pop("parallel", None)
+    configuration.pop("evaluation_policy", None)
+    return configuration
 
 
 def _validate_environment(args: argparse.Namespace) -> None:
@@ -174,12 +213,37 @@ def _error_record(
         "case_id": case.id,
         "score": None,
         "aggregate_contribution": 0.0,
+        "metrics": {key: None for key in METRIC_KEYS},
+        "aggregate_contributions": {key: 0.0 for key in METRIC_KEYS},
         "status": status,
         "language": case.language,
         "source": source,
         "preview": case.image,
         "output": None,
+        "outputs": {},
         "error": {"type": type(error).__name__, "message": str(error)},
+    }
+
+
+def _case_output_paths(output_root: Path, case_id: str) -> dict[str, Path]:
+    return {
+        "raw_largest": output_root / "outputs" / f"{case_id}.html",
+        **{
+            key: output_root / "derived" / key / f"{case_id}.html"
+            for key in OUTPUT_KEYS
+            if key != "raw_largest"
+        },
+    }
+
+
+def _relative_outputs(case_id: str) -> dict[str, str]:
+    return {
+        "raw_largest": f"outputs/{case_id}.html",
+        **{
+            key: f"derived/{key}/{case_id}.html"
+            for key in OUTPUT_KEYS
+            if key != "raw_largest"
+        },
     }
 
 
@@ -192,146 +256,239 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     configuration_sha256 = hashlib.sha256(
         json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    outputs_dir = output_root / "outputs"
+    provider_configuration_sha256 = hashlib.sha256(
+        json.dumps(
+            _provider_configuration(args),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     raw_dir = output_root / "raw"
     status_dir = output_root / "status"
     evaluation_dir = output_root / "evaluation"
-    for directory in (outputs_dir, raw_dir, status_dir, evaluation_dir):
+    derived_dir = output_root / "derived"
+    outputs_dir = output_root / "outputs"
+    for directory in (outputs_dir, derived_dir, raw_dir, status_dir, evaluation_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
     _write_json(
         output_root / "manifest.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "benchmark": "rd-tablebench",
             "status": "running",
             "configuration": configuration,
+            "evaluation_revision": EVALUATION_REVISION,
             "case_count": len(cases),
         },
     )
     analyze = _analyzer(args)
     parse = _parser(args.provider)
+    score_workers = min(args.parallel, os.cpu_count() or 1)
+    score_executor = (
+        ProcessPoolExecutor(max_workers=score_workers)
+        if len(cases) > 1 and score_workers > 1
+        else None
+    )
 
     def process(case: Case) -> dict[str, object]:
         source = _case_input(case, args.input_mode)
         input_path = dataset_root / source
         ground_truth_path = dataset_root / case.ground_truth
-        output_path = outputs_dir / f"{case.id}.html"
+        output_paths = _case_output_paths(output_root, case.id)
+        relative_outputs = _relative_outputs(case.id)
         raw_path = raw_dir / f"{case.id}.json"
         status_path = status_dir / f"{case.id}.json"
         input_sha256 = _sha256_file(input_path)
-        if status_path.is_file() and output_path.is_file() and raw_path.is_file():
-            status = json.loads(status_path.read_text(encoding="utf-8"))
+        ground_truth_sha256 = _sha256_file(ground_truth_path)
+        status = (
+            json.loads(status_path.read_text(encoding="utf-8"))
+            if status_path.is_file()
+            else {}
+        )
+        if raw_path.is_file() and all(
+            path.is_file() for path in output_paths.values()
+        ):
+            output_sha256s = {
+                key: _sha256_file(path) for key, path in output_paths.items()
+            }
             if (
                 status.get("status") == "scored"
                 and status.get("input_sha256") == input_sha256
                 and status.get("configuration_sha256") == configuration_sha256
-                and status.get("output_sha256") == _sha256_file(output_path)
+                and status.get("ground_truth_sha256") == ground_truth_sha256
+                and status.get("evaluation_revision") == EVALUATION_REVISION
+                and status.get("output_sha256s") == output_sha256s
                 and status.get("raw_sha256") == _sha256_file(raw_path)
                 and isinstance(status.get("result"), dict)
             ):
                 return status["result"]
 
-        output_path.unlink(missing_ok=True)
-        raw_path.unlink(missing_ok=True)
+        for output_path in output_paths.values():
+            output_path.unlink(missing_ok=True)
+        inference_compatible = (
+            raw_path.is_file()
+            and status.get("input_sha256") == input_sha256
+            and status.get("provider_configuration_sha256")
+            == provider_configuration_sha256
+            and status.get("raw_sha256") == _sha256_file(raw_path)
+        )
         started = time.monotonic()
-        try:
-            raw = analyze(input_path)
-            _write_json(raw_path, raw)
-        except Exception as error:  # Provider SDKs expose different error hierarchies.
-            result = _error_record(case, "inference_error", error, source)
-            _write_json(
-                status_path,
-                {
-                    "schema_version": 1,
-                    "case_id": case.id,
-                    "status": "inference_error",
-                    "input_sha256": input_sha256,
-                    "configuration_sha256": configuration_sha256,
-                    "duration_seconds": round(time.monotonic() - started, 3),
-                    "result": result,
-                },
-            )
-            return result
+        if not inference_compatible:
+            raw_path.unlink(missing_ok=True)
+            try:
+                raw = analyze(input_path)
+                _write_json(raw_path, raw)
+            except Exception as error:  # noqa: BLE001 - provider SDKs use unrelated errors.
+                result = _error_record(case, "inference_error", error, source)
+                _write_json(
+                    status_path,
+                    {
+                        "schema_version": 2,
+                        "case_id": case.id,
+                        "status": "inference_error",
+                        "input_sha256": input_sha256,
+                        "provider_configuration_sha256": provider_configuration_sha256,
+                        "configuration_sha256": configuration_sha256,
+                        "ground_truth_sha256": ground_truth_sha256,
+                        "evaluation_revision": EVALUATION_REVISION,
+                        "duration_seconds": round(time.monotonic() - started, 3),
+                        "result": result,
+                    },
+                )
+                return result
 
         try:
-            prediction_html, _ = parse(str(raw_path))
-            if not prediction_html:
-                raise ValueError("The provider response contains no HTML table.")
-            _write_text(output_path, prediction_html)
-            ground_truth = html_to_numpy(ground_truth_path.read_text(encoding="utf-8"))
-            prediction = html_to_numpy(prediction_html)
-            if ground_truth.size == 0 or prediction.size == 0:
-                raise ValueError("HTML did not contain a table with cells.")
-            score = float(table_similarity(ground_truth, prediction))
+            fallback_html, parsed_data = parse(str(raw_path))
+            if not isinstance(parsed_data, dict):
+                raise TypeError("The provider response is not a JSON object.")
+            outputs = build_metric_outputs(args.provider, parsed_data, fallback_html)
+            for key, value in outputs.items():
+                _write_text(output_paths[key], value)
+            ground_truth_html = ground_truth_path.read_text(encoding="utf-8")
+            scores = (
+                score_executor.submit(
+                    score_metric_outputs,
+                    ground_truth_html,
+                    outputs,
+                ).result()
+                if score_executor is not None
+                else score_metric_outputs(ground_truth_html, outputs)
+            )
+            score = scores[PRIMARY_METRIC_KEY]
             result: dict[str, object] = {
                 "case_id": case.id,
                 "score": score,
                 "aggregate_contribution": score,
+                "metrics": scores,
+                "aggregate_contributions": scores,
                 "status": "scored",
                 "language": case.language,
                 "source": source,
                 "preview": case.image,
-                "output": f"outputs/{case.id}.html",
+                "output": relative_outputs["raw_largest"],
+                "outputs": relative_outputs,
             }
             _write_json(
                 status_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "case_id": case.id,
                     "status": "scored",
                     "input_sha256": input_sha256,
+                    "provider_configuration_sha256": provider_configuration_sha256,
                     "configuration_sha256": configuration_sha256,
-                    "output_sha256": _sha256_file(output_path),
+                    "ground_truth_sha256": ground_truth_sha256,
+                    "evaluation_revision": EVALUATION_REVISION,
+                    "output_sha256s": {
+                        key: _sha256_file(path)
+                        for key, path in output_paths.items()
+                    },
                     "raw_sha256": _sha256_file(raw_path),
                     "duration_seconds": round(time.monotonic() - started, 3),
-                    "output": f"outputs/{case.id}.html",
+                    "output": relative_outputs["raw_largest"],
+                    "outputs": relative_outputs,
                     "raw": f"raw/{case.id}.json",
                     "result": result,
                 },
             )
             return result
-        except Exception as error:  # Parsing and native evaluator failures are distinct.
+        except Exception as error:  # noqa: BLE001 - records evaluator boundary failures.
             result = _error_record(case, "evaluation_error", error, source)
-            result["output"] = (
-                f"outputs/{case.id}.html" if output_path.is_file() else None
-            )
+            available_outputs = {
+                key: relative_outputs[key]
+                for key, path in output_paths.items()
+                if path.is_file()
+            }
+            result["output"] = available_outputs.get("raw_largest")
+            result["outputs"] = available_outputs
             _write_json(
                 status_path,
                 {
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "case_id": case.id,
                     "status": "evaluation_error",
                     "input_sha256": input_sha256,
+                    "provider_configuration_sha256": provider_configuration_sha256,
                     "configuration_sha256": configuration_sha256,
+                    "ground_truth_sha256": ground_truth_sha256,
+                    "evaluation_revision": EVALUATION_REVISION,
                     "raw_sha256": _sha256_file(raw_path),
                     "duration_seconds": round(time.monotonic() - started, 3),
                     "raw": f"raw/{case.id}.json",
+                    "outputs": available_outputs,
                     "result": result,
                 },
             )
             return result
 
     results: list[dict[str, object]] = []
-    with ThreadPoolExecutor(max_workers=args.parallel) as executor:
-        futures = {executor.submit(process, case): case.id for case in cases}
-        for future in as_completed(futures):
-            results.append(future.result())
+    try:
+        with ThreadPoolExecutor(max_workers=args.parallel) as executor:
+            futures = {executor.submit(process, case): case.id for case in cases}
+            for future in as_completed(futures):
+                results.append(future.result())
+    finally:
+        if score_executor is not None:
+            score_executor.shutdown()
     results.sort(key=lambda result: str(result["case_id"]))
     failures = [result for result in results if result["status"] != "scored"]
-    score = sum(float(result["aggregate_contribution"]) for result in results) / len(results)
+    aggregate_scores = {
+        key: sum(
+            float(result["aggregate_contributions"][key])  # type: ignore[index]
+            for result in results
+        )
+        / len(results)
+        for key in METRIC_KEYS
+    }
+    score = aggregate_scores[PRIMARY_METRIC_KEY]
     inference_errors = sum(result["status"] == "inference_error" for result in results)
     evaluation_errors = sum(result["status"] == "evaluation_error" for result in results)
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark": "rd-tablebench",
+        "evaluation_policy": EVALUATION_POLICY,
         "native_metric": {
             "name": "table_similarity",
+            "key": PRIMARY_METRIC_KEY,
             "value": score,
             "direction": "higher_is_better",
             "range": [0.0, 1.0],
         },
         "score": score * 100.0,
+        "metrics": {
+            key: {
+                "value": value,
+                "score": value * 100.0,
+                "direction": "higher_is_better",
+                "range": [0.0, 1.0],
+                "scored_count": len(results) - len(failures),
+                "inference_error_count": inference_errors,
+                "evaluation_error_count": evaluation_errors,
+                "skipped_count": 0,
+            }
+            for key, value in aggregate_scores.items()
+        },
         "case_count": len(results),
         "scored_count": len(results) - len(failures),
         "inference_error_count": inference_errors,
@@ -348,14 +505,16 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     _write_json(
         output_root / "manifest.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "benchmark": "rd-tablebench",
             "status": "completed",
             "configuration": configuration,
+            "evaluation_revision": EVALUATION_REVISION,
             "case_count": len(cases),
             "score": summary["score"],
             "artifacts": {
                 "outputs": "outputs",
+                "derived": "derived",
                 "raw": "raw",
                 "status": "status",
                 "results": "evaluation/results.jsonl",
@@ -376,6 +535,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--provider", choices=("azure-cu", "mistral"), required=True)
     run_parser.add_argument("--parallel", type=int, default=1)
     run_parser.add_argument("--input-mode", choices=("pdf", "image"), default="pdf")
+    run_parser.add_argument(
+        "--evaluation-policy",
+        choices=(EVALUATION_POLICY,),
+        default=EVALUATION_POLICY,
+    )
     run_parser.add_argument("--analyzer-id", default="prebuilt-layout")
     run_parser.add_argument("--mistral-provider", choices=("azure", "mistral"), default="azure")
     run_parser.add_argument("--mistral-model", default="mistral-ocr-4-0")

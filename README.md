@@ -59,6 +59,47 @@ After cell-level scores are computed, entire rows are aligned using a second Nee
 
 Before comparison, all cell content is normalized by stripping whitespace, newlines, and hyphens. The final similarity score is a value between `0` and `1`, where `1` represents a perfect structural and content match.
 
+### Versioned 3+3 Metric Policy
+
+The stable provider CLI uses evaluation policy `rd-tablebench-3x3-v1` and emits
+six metrics from the same raw provider response:
+
+| Metric | Prediction stage | Evaluator |
+|---|---|---|
+| `rd_raw_largest` | Raw largest table | Native hierarchical alignment |
+| `rd_ocr_largest` | Formula/glyph-adapted largest table | Native alignment with symmetric scoring normalization |
+| `rd_ocr_merged` | Formula/glyph-adapted compatible table merge | Native alignment with symmetric scoring normalization |
+| `teds_struct_raw_largest` | Raw largest table | Standard PubTabNet-style APTED TEDS-Struct |
+| `teds_struct_html_largest` | HTML-normalized largest table | Standard TEDS-Struct |
+| `teds_struct_html_merged` | HTML-normalized compatible table merge | Standard TEDS-Struct |
+
+`rd_raw_largest` remains the primary score. The six metrics are not averaged
+into a composite.
+
+The OCR path and structure path are deliberately independent:
+
+- Azure Content Understanding formula placeholders are recovered from the
+    document Markdown using cell spans, then rendered as deterministic visible
+    Unicode/plain text. Unknown LaTeX commands remain visible.
+- Visible output applies only the empirically safe `✗`/`✘` to `X` mapping.
+- RD OCR stages apply NFKC, checkbox-state, homoglyph, and spacing rules
+    symmetrically to ground truth and prediction at score time; those rules are
+    not written into released visible HTML.
+- `✓`, `✔`, `☑`, and `[x]` share the checked token. Empty boxes are optional.
+    CU frequently appends `☒` to otherwise numeric/text cells, so this policy also
+    treats `☒` as an optional CU scoring artifact while preserving it in visible
+    output; this is benchmark-specific rather than a general Unicode checkbox rule.
+- HTML normalization flattens section wrappers, normalizes `th` to `td`, repairs
+    invalid spans, and preserves visible cell text. It does not consume OCR text
+    normalization.
+- The standard TEDS-Struct evaluator itself canonicalizes `th` to `td` for every
+    stage, matching the established PubTabNet-compatible implementation. The HTML
+    stages additionally remove section wrappers and repair structural syntax before
+    that evaluator runs.
+- Compatible fragments are merged without ground-truth selection and without
+    sparse-grid repair. Azure uses table geometry; HTML providers use compatible
+    row/column shapes.
+
 ### Table Representation
 
 Tables are represented as 2D string arrays. Merged cells (via HTML `rowspan`/`colspan`) are expanded by repeating their values across every cell they occupy, ensuring consistent dimensionality for alignment.
@@ -124,6 +165,7 @@ The core evaluation code requires:
 numpy
 lxml
 python-Levenshtein
+apted
 ```
 
 Each provider script has its own dependencies (e.g., `boto3` for Textract, `azure-ai-documentintelligence` for Azure, `openai` for GPT-4o). See the [providers README](./providers/README.md) for per-provider requirements.

@@ -179,6 +179,7 @@ class BenchmarkCliTests(unittest.TestCase):
             mistral_model="mistral-ocr-4-0",
             input_mode="pdf",
             mistral_table_format="inline",
+            evaluation_policy=benchmark_cli.EVALUATION_POLICY,
         )
 
     def test_run_scores_and_resumes_matching_case(self):
@@ -205,10 +206,25 @@ class BenchmarkCliTests(unittest.TestCase):
                 json.loads(line)
                 for line in (root / "output/evaluation/results.jsonl").read_text().splitlines()
             ]
+            manifest = json.loads(
+                (root / "output/manifest.json").read_text(encoding="utf-8")
+            )
+            derived_outputs_exist = all(
+                (root / "output" / relative).is_file()
+                for relative in results[0]["outputs"].values()
+            )
 
         self.assertEqual(first["score"], 100.0)
         self.assertEqual(second["score"], 100.0)
         self.assertEqual(results[0]["status"], "scored")
+        self.assertEqual(set(results[0]["metrics"]), set(benchmark_cli.METRIC_KEYS))
+        self.assertTrue(all(score == 1.0 for score in results[0]["metrics"].values()))
+        self.assertEqual(set(first["metrics"]), set(benchmark_cli.METRIC_KEYS))
+        self.assertEqual(
+            manifest["configuration"]["evaluation_policy"],
+            benchmark_cli.EVALUATION_POLICY,
+        )
+        self.assertTrue(derived_outputs_exist)
 
     def test_input_mode_changes_source_and_prevents_cross_mode_resume(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -240,6 +256,88 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertEqual([path.name for path in observed], ["case.jpg"])
         self.assertEqual(result["source"], "_images/case.jpg")
 
+    def test_multiple_cases_use_process_safe_metric_scoring(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = self._dataset(root)
+            (dataset / "pdfs/case-2.pdf").write_bytes(b"pdf-2")
+            (dataset / "_images/case-2.jpg").write_bytes(b"jpg-2")
+            (dataset / "groundtruth/case-2.html").write_text(
+                "<table><tr><th>A</th><th>B</th></tr>"
+                "<tr><td>1</td><td>2</td></tr></table>",
+                encoding="utf-8",
+            )
+            with (dataset / "providers/scores.csv").open(
+                "a", encoding="utf-8", newline=""
+            ) as handle:
+                csv.writer(handle).writerow(["case-2.pdf", "en"])
+            args = self._args(dataset, root / "output")
+            args.parallel = 2
+            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
+            ):
+                summary = benchmark_cli.run(args)
+
+        self.assertEqual(summary["case_count"], 2)
+        self.assertEqual(summary["score"], 100.0)
+
+    def test_ground_truth_change_reuses_raw_and_rescores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            dataset = self._dataset(root)
+            args = self._args(dataset, root / "output")
+            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
+            ):
+                first = benchmark_cli.run(args)
+            (dataset / "groundtruth/case.html").write_text(
+                "<table><tr><th>A</th><th>B</th></tr>"
+                "<tr><td>9</td><td>9</td></tr></table>",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(
+                    benchmark_cli,
+                    "_analyzer",
+                    return_value=lambda _: self.fail("compatible raw response was not reused"),
+                ),
+            ):
+                second = benchmark_cli.run(args)
+
+        self.assertEqual(first["score"], 100.0)
+        self.assertLess(second["score"], 100.0)
+
+    def test_evaluator_revision_change_reuses_raw_and_rescores(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self._args(self._dataset(root), root / "output")
+            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
+            ):
+                benchmark_cli.run(args)
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "EVALUATION_REVISION", "changed"),
+                patch.object(
+                    benchmark_cli,
+                    "_analyzer",
+                    return_value=lambda _: self.fail("compatible raw response was not reused"),
+                ),
+            ):
+                benchmark_cli.run(args)
+            status = json.loads(
+                (root / "output/status/case.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(status["evaluation_revision"], "changed")
+
     def test_provider_failure_is_not_a_scored_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -260,6 +358,8 @@ class BenchmarkCliTests(unittest.TestCase):
         self.assertEqual(summary["score"], 0.0)
         self.assertEqual(result["status"], "inference_error")
         self.assertIsNone(result["score"])
+        self.assertEqual(set(result["metrics"]), set(benchmark_cli.METRIC_KEYS))
+        self.assertTrue(all(score is None for score in result["metrics"].values()))
 
 
 if __name__ == "__main__":
