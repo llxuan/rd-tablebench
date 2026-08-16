@@ -27,6 +27,12 @@ from parsing import (
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
 )
+from pdf_rendering import (
+    RENDERER_NAME,
+    render_single_page_png,
+    renderer_version,
+    validate_single_page_pdf,
+)
 from providers.azure_content_understanding import analyze as analyze_azure_cu
 from providers.mistral_ocr import analyze as analyze_mistral
 
@@ -61,6 +67,25 @@ def _evaluation_revision() -> str:
 
 
 EVALUATION_REVISION = _evaluation_revision()
+
+
+def _inference_revision() -> str:
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for relative in (
+        "benchmark_cli.py",
+        "pdf_rendering.py",
+        "providers/azure_content_understanding.py",
+        "providers/mistral_ocr.py",
+    ):
+        path = root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+INFERENCE_REVISION = _inference_revision()
 
 
 def _sha256_file(path: Path) -> str:
@@ -135,22 +160,26 @@ def _read_cases(dataset_root: Path) -> list[Case]:
 
 def _configuration(args: argparse.Namespace) -> dict[str, object]:
     if args.provider == "azure-cu":
-        return {
+        configuration: dict[str, object] = {
             "provider": args.provider,
             "parallel": args.parallel,
             "analyzer_id": args.analyzer_id,
             "input_mode": args.input_mode,
             "evaluation_policy": args.evaluation_policy,
         }
-    return {
-        "provider": args.provider,
-        "parallel": args.parallel,
-        "mistral_provider": args.mistral_provider,
-        "model": args.mistral_model,
-        "input_mode": args.input_mode,
-        "table_format": args.mistral_table_format,
-        "evaluation_policy": args.evaluation_policy,
-    }
+    else:
+        configuration = {
+            "provider": args.provider,
+            "parallel": args.parallel,
+            "mistral_provider": args.mistral_provider,
+            "model": args.mistral_model,
+            "input_mode": args.input_mode,
+            "table_format": args.mistral_table_format,
+            "evaluation_policy": args.evaluation_policy,
+        }
+    if args.pdf_render_dpi is not None:
+        configuration["pdf_render_dpi"] = args.pdf_render_dpi
+    return configuration
 
 
 def _provider_configuration(args: argparse.Namespace) -> dict[str, object]:
@@ -173,12 +202,57 @@ def _validate_environment(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 
+def _validate_input_contract(
+    args: argparse.Namespace,
+    cases: list[Case],
+    dataset_root: Path,
+) -> None:
+    if args.pdf_render_dpi is None:
+        return
+    if (
+        not isinstance(args.pdf_render_dpi, int)
+        or isinstance(args.pdf_render_dpi, bool)
+        or args.pdf_render_dpi <= 0
+    ):
+        raise ValueError("--pdf-render-dpi must be a positive integer.")
+    if args.pdf_render_dpi != 200:
+        raise ValueError("--pdf-render-dpi currently supports only 200.")
+    if args.input_mode != "pdf":
+        raise ValueError("--pdf-render-dpi requires --input-mode pdf.")
+    for case in cases:
+        validate_single_page_pdf(dataset_root / case.pdf)
+
+
+def _provider_media_type(args: argparse.Namespace) -> str:
+    if args.pdf_render_dpi is not None:
+        return "image/png"
+    return "application/pdf" if args.input_mode == "pdf" else "image/jpeg"
+
+
+def _provider_input_configuration(args: argparse.Namespace) -> dict[str, object]:
+    configuration: dict[str, object] = {
+        "source_input_mode": args.input_mode,
+        "media_type": _provider_media_type(args),
+    }
+    if args.pdf_render_dpi is not None:
+        configuration.update(
+            {
+                "render_dpi": args.pdf_render_dpi,
+                "renderer": RENDERER_NAME,
+                "renderer_version": renderer_version(),
+            }
+        )
+    return configuration
+
+
 def _analyzer(args: argparse.Namespace) -> Callable[[Path], dict[str, Any]]:
+    media_type = _provider_media_type(args)
     if args.provider == "azure-cu":
         return lambda path: analyze_azure_cu(
             path,
             args.analyzer_id,
             args.input_mode,
+            media_type,
         )
     return lambda path: analyze_mistral(
         path,
@@ -186,6 +260,7 @@ def _analyzer(args: argparse.Namespace) -> Callable[[Path], dict[str, Any]]:
         args.mistral_model,
         args.input_mode,
         args.mistral_table_format,
+        media_type,
     )
 
 
@@ -201,6 +276,21 @@ def _case_input(case: Case, input_mode: str) -> str:
     if input_mode == "image":
         return case.image
     raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
+
+
+def _prepare_provider_input(
+    source_path: Path,
+    rendered_path: Path,
+    pdf_render_dpi: int | None,
+) -> tuple[Path, dict[str, object]]:
+    if pdf_render_dpi is None:
+        return source_path, {}
+    metadata = render_single_page_png(
+        source_path,
+        rendered_path,
+        pdf_render_dpi,
+    )
+    return rendered_path, metadata
 
 
 def _error_record(
@@ -251,6 +341,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     dataset_root = Path(args.dataset_root).resolve()
     output_root = Path(args.output_root).resolve()
     cases = _read_cases(dataset_root)
+    _validate_input_contract(args, cases, dataset_root)
     _validate_environment(args)
     configuration = _configuration(args)
     configuration_sha256 = hashlib.sha256(
@@ -268,6 +359,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     evaluation_dir = output_root / "evaluation"
     derived_dir = output_root / "derived"
     outputs_dir = output_root / "outputs"
+    rendered_input_dir = output_root / "rendered-inputs"
     for directory in (outputs_dir, derived_dir, raw_dir, status_dir, evaluation_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -278,6 +370,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "benchmark": "rd-tablebench",
             "status": "running",
             "configuration": configuration,
+            "provider_input": _provider_input_configuration(args),
+            "inference_revision": INFERENCE_REVISION,
             "evaluation_revision": EVALUATION_REVISION,
             "case_count": len(cases),
         },
@@ -293,19 +387,31 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
     def process(case: Case) -> dict[str, object]:
         source = _case_input(case, args.input_mode)
-        input_path = dataset_root / source
+        source_path = dataset_root / source
+        rendered_input_path = rendered_input_dir / f"{case.id}.png"
         ground_truth_path = dataset_root / case.ground_truth
         output_paths = _case_output_paths(output_root, case.id)
         relative_outputs = _relative_outputs(case.id)
         raw_path = raw_dir / f"{case.id}.json"
         status_path = status_dir / f"{case.id}.json"
-        input_sha256 = _sha256_file(input_path)
+        source_sha256 = _sha256_file(source_path)
         ground_truth_sha256 = _sha256_file(ground_truth_path)
         status = (
             json.loads(status_path.read_text(encoding="utf-8"))
             if status_path.is_file()
             else {}
         )
+        input_path, render_metadata = _prepare_provider_input(
+            source_path,
+            rendered_input_path,
+            args.pdf_render_dpi,
+        )
+        input_sha256 = _sha256_file(input_path)
+        provider_input = {
+            "sha256": input_sha256,
+            "media_type": _provider_media_type(args),
+            **render_metadata,
+        }
         if raw_path.is_file() and all(
             path.is_file() for path in output_paths.values()
         ):
@@ -314,23 +420,28 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             }
             if (
                 status.get("status") == "scored"
+                and status.get("source_sha256") == source_sha256
                 and status.get("input_sha256") == input_sha256
                 and status.get("configuration_sha256") == configuration_sha256
                 and status.get("ground_truth_sha256") == ground_truth_sha256
+                and status.get("inference_revision") == INFERENCE_REVISION
                 and status.get("evaluation_revision") == EVALUATION_REVISION
                 and status.get("output_sha256s") == output_sha256s
                 and status.get("raw_sha256") == _sha256_file(raw_path)
                 and isinstance(status.get("result"), dict)
             ):
+                rendered_input_path.unlink(missing_ok=True)
                 return status["result"]
 
         for output_path in output_paths.values():
             output_path.unlink(missing_ok=True)
         inference_compatible = (
             raw_path.is_file()
+            and status.get("source_sha256") == source_sha256
             and status.get("input_sha256") == input_sha256
             and status.get("provider_configuration_sha256")
             == provider_configuration_sha256
+            and status.get("inference_revision") == INFERENCE_REVISION
             and status.get("raw_sha256") == _sha256_file(raw_path)
         )
         started = time.monotonic()
@@ -347,16 +458,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         "schema_version": 2,
                         "case_id": case.id,
                         "status": "inference_error",
+                        "source_sha256": source_sha256,
                         "input_sha256": input_sha256,
                         "provider_configuration_sha256": provider_configuration_sha256,
                         "configuration_sha256": configuration_sha256,
                         "ground_truth_sha256": ground_truth_sha256,
+                        "provider_input": provider_input,
+                        "inference_revision": INFERENCE_REVISION,
                         "evaluation_revision": EVALUATION_REVISION,
                         "duration_seconds": round(time.monotonic() - started, 3),
                         "result": result,
                     },
                 )
+                rendered_input_path.unlink(missing_ok=True)
                 return result
+
+        rendered_input_path.unlink(missing_ok=True)
 
         try:
             fallback_html, parsed_data = parse(str(raw_path))
@@ -395,10 +512,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     "schema_version": 2,
                     "case_id": case.id,
                     "status": "scored",
+                    "source_sha256": source_sha256,
                     "input_sha256": input_sha256,
                     "provider_configuration_sha256": provider_configuration_sha256,
                     "configuration_sha256": configuration_sha256,
                     "ground_truth_sha256": ground_truth_sha256,
+                    "provider_input": provider_input,
+                    "inference_revision": INFERENCE_REVISION,
                     "evaluation_revision": EVALUATION_REVISION,
                     "output_sha256s": {
                         key: _sha256_file(path)
@@ -428,10 +548,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                     "schema_version": 2,
                     "case_id": case.id,
                     "status": "evaluation_error",
+                    "source_sha256": source_sha256,
                     "input_sha256": input_sha256,
                     "provider_configuration_sha256": provider_configuration_sha256,
                     "configuration_sha256": configuration_sha256,
                     "ground_truth_sha256": ground_truth_sha256,
+                    "provider_input": provider_input,
+                    "inference_revision": INFERENCE_REVISION,
                     "evaluation_revision": EVALUATION_REVISION,
                     "raw_sha256": _sha256_file(raw_path),
                     "duration_seconds": round(time.monotonic() - started, 3),
@@ -509,6 +632,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "benchmark": "rd-tablebench",
             "status": "completed",
             "configuration": configuration,
+            "provider_input": _provider_input_configuration(args),
+            "inference_revision": INFERENCE_REVISION,
             "evaluation_revision": EVALUATION_REVISION,
             "case_count": len(cases),
             "score": summary["score"],
@@ -535,6 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--provider", choices=("azure-cu", "mistral"), required=True)
     run_parser.add_argument("--parallel", type=int, default=1)
     run_parser.add_argument("--input-mode", choices=("pdf", "image"), default="pdf")
+    run_parser.add_argument("--pdf-render-dpi", type=int)
     run_parser.add_argument(
         "--evaluation-policy",
         choices=(EVALUATION_POLICY,),
@@ -555,6 +681,12 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.parallel <= 0:
         raise ValueError("--parallel must be positive.")
+    if args.pdf_render_dpi is not None and args.pdf_render_dpi <= 0:
+        raise ValueError("--pdf-render-dpi must be positive.")
+    if args.pdf_render_dpi is not None and args.pdf_render_dpi != 200:
+        raise ValueError("--pdf-render-dpi currently supports only 200.")
+    if args.pdf_render_dpi is not None and args.input_mode != "pdf":
+        raise ValueError("--pdf-render-dpi requires --input-mode pdf.")
     if args.command == "run":
         summary = run(args)
         print(json.dumps(summary, sort_keys=True))

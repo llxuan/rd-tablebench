@@ -72,7 +72,11 @@ For Azure-hosted Mistral OCR, use `--provider mistral`,
 The released dataset includes both padded PDFs and tight JPG table crops. Select
 one explicit input contract with `--input-mode pdf|image`. Azure Content
 Understanding receives the matching `application/pdf` or `image/jpeg` content
-type. For Mistral's structured table output, add
+type. Add `--pdf-render-dpi 200` with `--input-mode pdf` to require a
+single-page PDF, render it deterministically with pinned PyMuPDF, and send the
+same lossless `image/png` pixels to either provider. Render DPI, renderer
+version, source hash, payload hash, and MIME participate in provenance and
+resume compatibility. For Mistral's structured table output, add
 `--mistral-table-format html`; the parser consumes ordered
 `pages[].tables[].content` entries because page Markdown contains only table
 placeholders in this mode. Input mode and table format are included in the

@@ -47,14 +47,19 @@ def process(
     raise RuntimeError("Mistral OCR exhausted its retry budget.")
 
 
-def input_document(input_path: Path, input_mode: str) -> dict[str, str]:
+def input_document(
+    input_path: Path,
+    input_mode: str,
+    media_type: str | None = None,
+) -> dict[str, str]:
     encoded = base64.b64encode(input_path.read_bytes()).decode("ascii")
-    if input_mode == "pdf":
-        media_type = "application/pdf"
-    elif input_mode == "image":
-        media_type = "image/jpeg"
-    else:
-        raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
+    if media_type is None:
+        if input_mode == "pdf":
+            media_type = "application/pdf"
+        elif input_mode == "image":
+            media_type = "image/jpeg"
+        else:
+            raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
     return {
         "type": "document_url",
         "document_url": f"data:{media_type};base64,{encoded}",
@@ -67,6 +72,7 @@ def analyze(
     model: str,
     input_mode: str,
     table_format: str,
+    media_type: str | None = None,
 ) -> dict[str, Any]:
     """Analyze one released PDF or JPG and return the raw response."""
     api_key = os.environ.get("MISTRAL_API_KEY")
@@ -91,7 +97,7 @@ def analyze(
     response = process(
         client,
         model,
-        input_document(input_path, input_mode),
+        input_document(input_path, input_mode, media_type),
         None if table_format == "inline" else table_format,
     )
     raw = response.model_dump(mode="json")
