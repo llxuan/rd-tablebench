@@ -10,8 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 from unittest.mock import Mock
 
-import pymupdf
-
 UPSTREAM_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(UPSTREAM_ROOT))
 
@@ -22,10 +20,6 @@ from parsing import (  # noqa: E402
 )
 from providers.azure_content_understanding import input_content_type  # noqa: E402
 from providers.mistral_ocr import input_document, process  # noqa: E402
-from pdf_rendering import (  # noqa: E402
-    render_single_page_png,
-    validate_single_page_pdf,
-)
 
 
 class ParsingTests(unittest.TestCase):
@@ -137,42 +131,6 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(png_document["type"], "image_url")
         self.assertTrue(png_document["image_url"].startswith("data:image/png;base64,"))
 
-    def test_renders_single_page_pdf_to_deterministic_200_dpi_png(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "case.pdf"
-            first = root / "first.png"
-            second = root / "second.png"
-            document = pymupdf.open()
-            page = document.new_page(width=72, height=36)
-            page.insert_text((6, 18), "RD-TableBench")
-            document.save(source)
-            document.close()
-
-            first_metadata = render_single_page_png(source, first, 200)
-            second_metadata = render_single_page_png(source, second, 200)
-            first_bytes = first.read_bytes()
-            second_bytes = second.read_bytes()
-
-        self.assertEqual(first_metadata["dpi"], 200)
-        self.assertEqual(first_metadata["media_type"], "image/png")
-        self.assertEqual(first_metadata["width"], 200)
-        self.assertEqual(first_metadata["height"], 100)
-        self.assertEqual(first_bytes, second_bytes)
-        self.assertTrue(first_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
-
-    def test_rejects_multi_page_pdf_for_rendered_input(self):
-        with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "case.pdf"
-            document = pymupdf.open()
-            document.new_page()
-            document.new_page()
-            document.save(source)
-            document.close()
-
-            with self.assertRaisesRegex(ValueError, "exactly one page"):
-                validate_single_page_pdf(source)
-
     def test_mistral_retries_using_azure_retry_after_ms(self):
         class RateLimitError(RuntimeError):
             status_code = 429
@@ -195,14 +153,6 @@ class ParsingTests(unittest.TestCase):
 
 
 class BenchmarkCliTests(unittest.TestCase):
-    def _write_valid_pdf(self, path: Path, pages: int = 1) -> None:
-        document = pymupdf.open()
-        for _ in range(pages):
-            page = document.new_page(width=72, height=36)
-            page.insert_text((6, 18), "RD-TableBench")
-        document.save(path)
-        document.close()
-
     def _dataset(self, root: Path) -> Path:
         dataset = root / "dataset"
         for relative, content in {
@@ -235,7 +185,6 @@ class BenchmarkCliTests(unittest.TestCase):
             mistral_provider="azure",
             mistral_model="mistral-ocr-4-0",
             input_mode="pdf",
-            pdf_render_dpi=None,
             mistral_table_format="inline",
             evaluation_policy=benchmark_cli.EVALUATION_POLICY,
         )
@@ -313,122 +262,6 @@ class BenchmarkCliTests(unittest.TestCase):
 
         self.assertEqual([path.name for path in observed], ["case.jpg"])
         self.assertEqual(result["source"], "_images/case.jpg")
-
-    def test_rendered_pdf_uses_png_payload_preserves_source_and_resumes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dataset = self._dataset(root)
-            self._write_valid_pdf(dataset / "pdfs/case.pdf")
-            args = self._args(dataset, root / "output")
-            args.pdf_render_dpi = 200
-            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
-            observed: list[tuple[str, bytes]] = []
-
-            def analyze(path: Path) -> dict[str, object]:
-                observed.append((path.suffix, path.read_bytes()))
-                return raw
-
-            with (
-                patch.object(benchmark_cli, "_validate_environment"),
-                patch.object(benchmark_cli, "_analyzer", return_value=analyze),
-            ):
-                first = benchmark_cli.run(args)
-            with (
-                patch.object(benchmark_cli, "_validate_environment"),
-                patch.object(
-                    benchmark_cli,
-                    "_analyzer",
-                    return_value=lambda _: self.fail("matching rendered case was not resumed"),
-                ),
-            ):
-                second = benchmark_cli.run(args)
-
-            result = json.loads(
-                (root / "output/evaluation/results.jsonl").read_text().splitlines()[0]
-            )
-            status = json.loads(
-                (root / "output/status/case.json").read_text(encoding="utf-8")
-            )
-            manifest = json.loads(
-                (root / "output/manifest.json").read_text(encoding="utf-8")
-            )
-            rendered_input_exists = (root / "output/rendered-inputs/case.png").exists()
-
-        self.assertEqual(first["score"], 100.0)
-        self.assertEqual(second["score"], 100.0)
-        self.assertEqual(len(observed), 1)
-        self.assertEqual(observed[0][0], ".png")
-        self.assertTrue(observed[0][1].startswith(b"\x89PNG\r\n\x1a\n"))
-        self.assertEqual(result["source"], "pdfs/case.pdf")
-        self.assertEqual(status["provider_input"]["dpi"], 200)
-        self.assertEqual(status["provider_input"]["media_type"], "image/png")
-        self.assertEqual(manifest["configuration"]["pdf_render_dpi"], 200)
-        self.assertFalse(rendered_input_exists)
-
-    def test_rendered_pdf_forwards_png_mime_to_both_providers(self):
-        path = Path("case.png")
-        mistral_args = argparse.Namespace(
-            provider="mistral",
-            mistral_provider="azure",
-            mistral_model="mistral-ocr-4-0",
-            mistral_table_format="html",
-            input_mode="pdf",
-            pdf_render_dpi=200,
-        )
-        azure_args = argparse.Namespace(
-            provider="azure-cu",
-            analyzer_id="prebuilt-layout",
-            input_mode="pdf",
-            pdf_render_dpi=200,
-        )
-        with patch.object(benchmark_cli, "analyze_mistral") as mistral:
-            benchmark_cli._analyzer(mistral_args)(path)
-        with patch.object(benchmark_cli, "analyze_azure_cu") as azure:
-            benchmark_cli._analyzer(azure_args)(path)
-
-        mistral.assert_called_once_with(
-            path,
-            "azure",
-            "mistral-ocr-4-0",
-            "pdf",
-            "html",
-            "image/png",
-        )
-        azure.assert_called_once_with(
-            path,
-            "prebuilt-layout",
-            "pdf",
-            "image/png",
-        )
-
-    def test_render_dpi_rejects_image_input_before_provider(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            args = self._args(self._dataset(root), root / "output")
-            args.input_mode = "image"
-            args.pdf_render_dpi = 200
-            with (
-                patch.object(benchmark_cli, "_validate_environment") as validate,
-                self.assertRaisesRegex(ValueError, "requires --input-mode pdf"),
-            ):
-                benchmark_cli.run(args)
-
-        validate.assert_not_called()
-
-    def test_render_dpi_rejects_unsupported_value_before_provider(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            dataset = self._dataset(root)
-            self._write_valid_pdf(dataset / "pdfs/case.pdf")
-            args = self._args(dataset, root / "output")
-            args.pdf_render_dpi = 300
-            with (
-                patch.object(benchmark_cli, "_validate_environment") as validate,
-                self.assertRaisesRegex(ValueError, "supports only 200"),
-            ):
-                benchmark_cli.run(args)
-
-        validate.assert_not_called()
 
     def test_multiple_cases_use_process_safe_metric_scoring(self):
         with tempfile.TemporaryDirectory() as directory:

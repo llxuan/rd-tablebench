@@ -32,12 +32,6 @@ from parsing import (
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
 )
-from pdf_rendering import (
-    RENDERER_NAME,
-    render_single_page_png,
-    renderer_version,
-    validate_single_page_pdf,
-)
 from providers.azure_content_understanding import analyze as analyze_azure_cu
 from providers.mistral_ocr import analyze as analyze_mistral
 
@@ -80,7 +74,6 @@ def _inference_revision() -> str:
     digest = hashlib.sha256()
     for relative in (
         "benchmark_cli.py",
-        "pdf_rendering.py",
         "providers/azure_content_understanding.py",
         "providers/mistral_ocr.py",
     ):
@@ -96,6 +89,9 @@ LEGACY_INFERENCE_REVISIONS = {
     # 9fa08fd: provider/input code is unchanged; this revision predates only
     # post-evaluation error diagnostics, so its cached raw responses are safe.
     "10cab94cb22d2f3db96aa8887f08d790e1f1713c561f0d1ff631791a1df72ffb",
+    # 119d5a5: raw PDF/JPG provider inputs are unchanged by removing the local
+    # PDF-render branch, so those cached raw responses remain safe.
+    "1e39c577da78160e6a8c9731faf7900066cd91beddcdc551d88a5623a13670f3",
 }
 
 
@@ -188,8 +184,6 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
             "table_format": args.mistral_table_format,
             "evaluation_policy": args.evaluation_policy,
         }
-    if args.pdf_render_dpi is not None:
-        configuration["pdf_render_dpi"] = args.pdf_render_dpi
     return configuration
 
 
@@ -213,47 +207,15 @@ def _validate_environment(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 
-def _validate_input_contract(
-    args: argparse.Namespace,
-    cases: list[Case],
-    dataset_root: Path,
-) -> None:
-    if args.pdf_render_dpi is None:
-        return
-    if (
-        not isinstance(args.pdf_render_dpi, int)
-        or isinstance(args.pdf_render_dpi, bool)
-        or args.pdf_render_dpi <= 0
-    ):
-        raise ValueError("--pdf-render-dpi must be a positive integer.")
-    if args.pdf_render_dpi != 200:
-        raise ValueError("--pdf-render-dpi currently supports only 200.")
-    if args.input_mode != "pdf":
-        raise ValueError("--pdf-render-dpi requires --input-mode pdf.")
-    for case in cases:
-        validate_single_page_pdf(dataset_root / case.pdf)
-
-
 def _provider_media_type(args: argparse.Namespace) -> str:
-    if args.pdf_render_dpi is not None:
-        return "image/png"
     return "application/pdf" if args.input_mode == "pdf" else "image/jpeg"
 
 
 def _provider_input_configuration(args: argparse.Namespace) -> dict[str, object]:
-    configuration: dict[str, object] = {
+    return {
         "source_input_mode": args.input_mode,
         "media_type": _provider_media_type(args),
     }
-    if args.pdf_render_dpi is not None:
-        configuration.update(
-            {
-                "render_dpi": args.pdf_render_dpi,
-                "renderer": RENDERER_NAME,
-                "renderer_version": renderer_version(),
-            }
-        )
-    return configuration
 
 
 def _analyzer(args: argparse.Namespace) -> Callable[[Path], dict[str, Any]]:
@@ -287,21 +249,6 @@ def _case_input(case: Case, input_mode: str) -> str:
     if input_mode == "image":
         return case.image
     raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
-
-
-def _prepare_provider_input(
-    source_path: Path,
-    rendered_path: Path,
-    pdf_render_dpi: int | None,
-) -> tuple[Path, dict[str, object]]:
-    if pdf_render_dpi is None:
-        return source_path, {}
-    metadata = render_single_page_png(
-        source_path,
-        rendered_path,
-        pdf_render_dpi,
-    )
-    return rendered_path, metadata
 
 
 def _error_record(
@@ -354,7 +301,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     dataset_root = Path(args.dataset_root).resolve()
     output_root = Path(args.output_root).resolve()
     cases = _read_cases(dataset_root)
-    _validate_input_contract(args, cases, dataset_root)
     _validate_environment(args)
     configuration = _configuration(args)
     configuration_sha256 = hashlib.sha256(
@@ -372,7 +318,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     evaluation_dir = output_root / "evaluation"
     derived_dir = output_root / "derived"
     outputs_dir = output_root / "outputs"
-    rendered_input_dir = output_root / "rendered-inputs"
     for directory in (outputs_dir, derived_dir, raw_dir, status_dir, evaluation_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
@@ -402,7 +347,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     def process(case: Case) -> dict[str, object]:
         source = _case_input(case, args.input_mode)
         source_path = dataset_root / source
-        rendered_input_path = rendered_input_dir / f"{case.id}.png"
         ground_truth_path = dataset_root / case.ground_truth
         ground_truth_html = ground_truth_path.read_text(encoding="utf-8")
         output_paths = _case_output_paths(output_root, case.id)
@@ -416,16 +360,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             if status_path.is_file()
             else {}
         )
-        input_path, render_metadata = _prepare_provider_input(
-            source_path,
-            rendered_input_path,
-            args.pdf_render_dpi,
-        )
-        input_sha256 = _sha256_file(input_path)
+        input_sha256 = source_sha256
         provider_input = {
             "sha256": input_sha256,
             "media_type": _provider_media_type(args),
-            **render_metadata,
         }
         if raw_path.is_file() and all(
             path.is_file() for path in output_paths.values()
@@ -445,7 +383,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 and status.get("raw_sha256") == _sha256_file(raw_path)
                 and isinstance(status.get("result"), dict)
             ):
-                rendered_input_path.unlink(missing_ok=True)
                 return status["result"]
 
         for output_path in output_paths.values():
@@ -464,7 +401,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         if not inference_compatible:
             raw_path.unlink(missing_ok=True)
             try:
-                raw = analyze(input_path)
+                raw = analyze(source_path)
                 _write_json(raw_path, raw)
             except Exception as error:  # noqa: BLE001 - provider SDKs use unrelated errors.
                 error_analysis = build_error_analysis(
@@ -501,10 +438,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                         "result": result,
                     },
                 )
-                rendered_input_path.unlink(missing_ok=True)
                 return result
-
-        rendered_input_path.unlink(missing_ok=True)
 
         fallback_html: str | None = None
         parsed_data: dict[str, Any] | None = None
@@ -721,7 +655,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--provider", choices=("azure-cu", "mistral"), required=True)
     run_parser.add_argument("--parallel", type=int, default=1)
     run_parser.add_argument("--input-mode", choices=("pdf", "image"), default="pdf")
-    run_parser.add_argument("--pdf-render-dpi", type=int)
     run_parser.add_argument(
         "--evaluation-policy",
         choices=(EVALUATION_POLICY,),
@@ -742,12 +675,6 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.parallel <= 0:
         raise ValueError("--parallel must be positive.")
-    if args.pdf_render_dpi is not None and args.pdf_render_dpi <= 0:
-        raise ValueError("--pdf-render-dpi must be positive.")
-    if args.pdf_render_dpi is not None and args.pdf_render_dpi != 200:
-        raise ValueError("--pdf-render-dpi currently supports only 200.")
-    if args.pdf_render_dpi is not None and args.input_mode != "pdf":
-        raise ValueError("--pdf-render-dpi requires --input-mode pdf.")
     if args.command == "run":
         summary = run(args)
         print(json.dumps(summary, sort_keys=True))
