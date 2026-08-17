@@ -76,7 +76,8 @@ type. Add `--pdf-render-dpi 200` with `--input-mode pdf` to require a
 single-page PDF, render it deterministically with pinned PyMuPDF, and send the
 same lossless `image/png` pixels to either provider. Render DPI, renderer
 version, source hash, payload hash, and MIME participate in provenance and
-resume compatibility. For Mistral's structured table output, add
+resume compatibility. Mistral uses the OCR API's `image_url` document variant
+for PNG/JPEG payloads and `document_url` for PDFs. For Mistral's structured table output, add
 `--mistral-table-format html`; the parser consumes ordered
 `pages[].tables[].content` entries because page Markdown contains only table
 placeholders in this mode. Input mode and table format are included in the

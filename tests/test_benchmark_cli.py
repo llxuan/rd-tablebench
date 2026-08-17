@@ -131,8 +131,11 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(input_content_type("pdf"), "application/pdf")
         self.assertEqual(input_content_type("image"), "image/jpeg")
         self.assertTrue(pdf_document["document_url"].startswith("data:application/pdf;base64,"))
-        self.assertTrue(image_document["document_url"].startswith("data:image/jpeg;base64,"))
-        self.assertTrue(png_document["document_url"].startswith("data:image/png;base64,"))
+        self.assertEqual(pdf_document["type"], "document_url")
+        self.assertEqual(image_document["type"], "image_url")
+        self.assertTrue(image_document["image_url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(png_document["type"], "image_url")
+        self.assertTrue(png_document["image_url"].startswith("data:image/png;base64,"))
 
     def test_renders_single_page_pdf_to_deterministic_200_dpi_png(self):
         with tempfile.TemporaryDirectory() as directory:

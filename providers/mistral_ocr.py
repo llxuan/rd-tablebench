@@ -60,10 +60,13 @@ def input_document(
             media_type = "image/jpeg"
         else:
             raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
-    return {
-        "type": "document_url",
-        "document_url": f"data:{media_type};base64,{encoded}",
-    }
+    data_url = f"data:{media_type};base64,{encoded}"
+    if media_type.startswith("image/"):
+        return {
+            "type": "image_url",
+            "image_url": data_url,
+        }
+    return {"type": "document_url", "document_url": data_url}
 
 
 def analyze(
