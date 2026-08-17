@@ -512,6 +512,44 @@ class BenchmarkCliTests(unittest.TestCase):
 
         self.assertEqual(status["evaluation_revision"], "changed")
 
+    def test_legacy_inference_revision_reuses_raw_for_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            args = self._args(self._dataset(root), root / "output")
+            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
+            ):
+                benchmark_cli.run(args)
+            status_path = root / "output/status/case.json"
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["inference_revision"] = next(
+                iter(benchmark_cli.LEGACY_INFERENCE_REVISIONS)
+            )
+            benchmark_cli._write_json(status_path, status)
+            with (
+                patch.object(benchmark_cli, "_validate_environment"),
+                patch.object(
+                    benchmark_cli,
+                    "_analyzer",
+                    return_value=lambda _: self.fail(
+                        "legacy compatible raw response was not reused"
+                    ),
+                ),
+            ):
+                benchmark_cli.run(args)
+            updated = json.loads(status_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            updated["inference_revision"],
+            benchmark_cli.INFERENCE_REVISION,
+        )
+        self.assertEqual(
+            updated["result"]["error_analysis"]["version"],
+            benchmark_cli.ERROR_ANALYSIS_VERSION,
+        )
+
     def test_provider_failure_is_not_a_scored_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

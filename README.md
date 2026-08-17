@@ -100,6 +100,30 @@ The OCR path and structure path are deliberately independent:
     sparse-grid repair. Azure uses table geometry; HTML providers use compatible
     row/column shapes.
 
+### Versioned Error Analysis
+
+The stable CLI also emits diagnostic policy `rd-error-analysis-v1`. This is a
+post-evaluation, ground-truth-aware explanation layer; it never changes provider
+requests, derived tables, official scores, or the fixed denominator. Every case
+whose primary score is below one (including inference/evaluation errors) receives
+exactly one category, in this precedence:
+
+1. `ocr_error`: expected table count and exact TSR structure, but text loses score;
+2. `table_missed`: successful provider response with no table;
+3. `table_over_detected`: more than one provider table result;
+4. `table_region_incomplete`: normalized predicted table text covers less than
+   80% of non-empty GT cell text lines;
+5. `cell_over_split`: correct table count with more logical prediction cells;
+6. `cell_under_split`: correct table count with fewer logical prediction cells;
+7. `other_error`: remaining score-loss cases.
+
+The text-coverage proxy migrates the reference analysis report's symmetric text
+normalization and fuzzy trigram matching into portable benchmark code. A GT line
+is covered by substring containment or at least 0.65 trigram recall. Empty GT
+tables are marked not measurable rather than treated as fully covered. Diagnostics
+retain the table/cell counts, exact structure result, covered/total lines,
+thresholds, and `uses_ground_truth: true` provenance.
+
 ### Table Representation
 
 Tables are represented as 2D string arrays. Merged cells (via HTML `rowspan`/`colspan`) are expanded by repeating their values across every cell they occupy, ensuring consistent dimensionality for alignment.

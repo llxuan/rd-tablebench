@@ -15,6 +15,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from error_analysis import (
+    ERROR_ANALYSIS_VERSION,
+    build_error_analysis,
+    summarize_error_analysis,
+)
 from metric_tracks import (
     EVALUATION_POLICY,
     METRIC_KEYS,
@@ -52,6 +57,7 @@ def _evaluation_revision() -> str:
     for name in (
         "benchmark_cli.py",
         "convert.py",
+        "error_analysis.py",
         "formula_text.py",
         "grading.py",
         "html_normalization.py",
@@ -86,6 +92,11 @@ def _inference_revision() -> str:
 
 
 INFERENCE_REVISION = _inference_revision()
+LEGACY_INFERENCE_REVISIONS = {
+    # 9fa08fd: provider/input code is unchanged; this revision predates only
+    # post-evaluation error diagnostics, so its cached raw responses are safe.
+    "10cab94cb22d2f3db96aa8887f08d790e1f1713c561f0d1ff631791a1df72ffb",
+}
 
 
 def _sha256_file(path: Path) -> str:
@@ -298,6 +309,7 @@ def _error_record(
     status: str,
     error: Exception,
     source: str,
+    error_analysis: dict[str, object],
 ) -> dict[str, object]:
     return {
         "case_id": case.id,
@@ -312,6 +324,7 @@ def _error_record(
         "output": None,
         "outputs": {},
         "error": {"type": type(error).__name__, "message": str(error)},
+        "error_analysis": error_analysis,
     }
 
 
@@ -373,6 +386,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "provider_input": _provider_input_configuration(args),
             "inference_revision": INFERENCE_REVISION,
             "evaluation_revision": EVALUATION_REVISION,
+            "error_analysis_version": ERROR_ANALYSIS_VERSION,
             "case_count": len(cases),
         },
     )
@@ -390,6 +404,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         source_path = dataset_root / source
         rendered_input_path = rendered_input_dir / f"{case.id}.png"
         ground_truth_path = dataset_root / case.ground_truth
+        ground_truth_html = ground_truth_path.read_text(encoding="utf-8")
         output_paths = _case_output_paths(output_root, case.id)
         relative_outputs = _relative_outputs(case.id)
         raw_path = raw_dir / f"{case.id}.json"
@@ -441,7 +456,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             and status.get("input_sha256") == input_sha256
             and status.get("provider_configuration_sha256")
             == provider_configuration_sha256
-            and status.get("inference_revision") == INFERENCE_REVISION
+            and status.get("inference_revision")
+            in {INFERENCE_REVISION, *LEGACY_INFERENCE_REVISIONS}
             and status.get("raw_sha256") == _sha256_file(raw_path)
         )
         started = time.monotonic()
@@ -451,7 +467,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 raw = analyze(input_path)
                 _write_json(raw_path, raw)
             except Exception as error:  # noqa: BLE001 - provider SDKs use unrelated errors.
-                result = _error_record(case, "inference_error", error, source)
+                error_analysis = build_error_analysis(
+                    provider=args.provider,
+                    data=None,
+                    fallback_html=None,
+                    ground_truth_html=ground_truth_html,
+                    outputs=None,
+                    score=None,
+                    status="inference_error",
+                )
+                result = _error_record(
+                    case,
+                    "inference_error",
+                    error,
+                    source,
+                    error_analysis,
+                )
                 _write_json(
                     status_path,
                     {
@@ -475,6 +506,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
 
         rendered_input_path.unlink(missing_ok=True)
 
+        fallback_html: str | None = None
+        parsed_data: dict[str, Any] | None = None
+        outputs: dict[str, str] | None = None
         try:
             fallback_html, parsed_data = parse(str(raw_path))
             if not isinstance(parsed_data, dict):
@@ -482,7 +516,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             outputs = build_metric_outputs(args.provider, parsed_data, fallback_html)
             for key, value in outputs.items():
                 _write_text(output_paths[key], value)
-            ground_truth_html = ground_truth_path.read_text(encoding="utf-8")
             scores = (
                 score_executor.submit(
                     score_metric_outputs,
@@ -493,6 +526,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 else score_metric_outputs(ground_truth_html, outputs)
             )
             score = scores[PRIMARY_METRIC_KEY]
+            error_analysis = build_error_analysis(
+                provider=args.provider,
+                data=parsed_data,
+                fallback_html=fallback_html,
+                ground_truth_html=ground_truth_html,
+                outputs=outputs,
+                score=score,
+                status="scored",
+            )
             result: dict[str, object] = {
                 "case_id": case.id,
                 "score": score,
@@ -505,6 +547,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "preview": case.image,
                 "output": relative_outputs["raw_largest"],
                 "outputs": relative_outputs,
+                "error_analysis": error_analysis,
             }
             _write_json(
                 status_path,
@@ -534,7 +577,22 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             )
             return result
         except Exception as error:  # noqa: BLE001 - records evaluator boundary failures.
-            result = _error_record(case, "evaluation_error", error, source)
+            error_analysis = build_error_analysis(
+                provider=args.provider,
+                data=parsed_data,
+                fallback_html=fallback_html,
+                ground_truth_html=ground_truth_html,
+                outputs=outputs,
+                score=None,
+                status="evaluation_error",
+            )
+            result = _error_record(
+                case,
+                "evaluation_error",
+                error,
+                source,
+                error_analysis,
+            )
             available_outputs = {
                 key: relative_outputs[key]
                 for key, path in output_paths.items()
@@ -587,6 +645,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     score = aggregate_scores[PRIMARY_METRIC_KEY]
     inference_errors = sum(result["status"] == "inference_error" for result in results)
     evaluation_errors = sum(result["status"] == "evaluation_error" for result in results)
+    error_analysis_summary = summarize_error_analysis(results)
     summary = {
         "schema_version": 2,
         "benchmark": "rd-tablebench",
@@ -618,6 +677,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "evaluation_error_count": evaluation_errors,
         "failure_count": len(failures),
         "skipped_count": 0,
+        "error_analysis": error_analysis_summary,
         "denominator_policy": (
             "All selected cases; inference and evaluation errors contribute zero."
         ),
@@ -635,6 +695,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "provider_input": _provider_input_configuration(args),
             "inference_revision": INFERENCE_REVISION,
             "evaluation_revision": EVALUATION_REVISION,
+            "error_analysis_version": ERROR_ANALYSIS_VERSION,
             "case_count": len(cases),
             "score": summary["score"],
             "artifacts": {
