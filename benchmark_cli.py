@@ -87,13 +87,17 @@ INFERENCE_REVISION = _inference_revision()
 LEGACY_INFERENCE_REVISIONS = {
     # 9fa08fd: provider/input code is unchanged; this revision predates only
     # post-evaluation error diagnostics, so its cached raw responses are safe.
+    # Both CRLF and LF checkout hashes are retained.
     "10cab94cb22d2f3db96aa8887f08d790e1f1713c561f0d1ff631791a1df72ffb",
+    "f972c4a3daa2a152bce9db4773c633e6a29e473132890cc5dac6dbd51dd7b671",
     # 119d5a5: the released-PDF provider request is unchanged by the subsequent
     # rendered-track cleanup, so its cached raw responses remain safe.
     "1e39c577da78160e6a8c9731faf7900066cd91beddcdc551d88a5623a13670f3",
+    "92035547ad3a4474e7919d82abe28be05beb1504151dd17bcc6e1be795a4583f",
     # 388a4cd: the released-PDF request path is unchanged by removing the JPG
     # input contract, so its cached raw responses remain safe.
     "16261bb1a86529144c798d6de37f6cd7e12e6bf8365ad0785611e2f44f52cca8",
+    "fd0ba045a8d2af40766faaf52d3ecde892239f9f6d1468aded9e308ab654fb6f",
 }
 
 
