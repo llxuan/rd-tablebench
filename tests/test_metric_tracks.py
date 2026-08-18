@@ -174,6 +174,26 @@ class AzureMetricOutputTests(unittest.TestCase):
         outputs = build_metric_outputs("azure-cu", data, None)
         self.assertIn("Rate β today", outputs["ocr_largest"])
 
+    def test_recovers_formula_from_selfhost_utf16_span(self):
+        markdown = "😀 prefix $$\\beta$$ suffix"
+        formula = "$$\\beta$$"
+        prefix = markdown[: markdown.index(formula)]
+        span = {
+            "offset": len(prefix.encode("utf-16-le")) // 2,
+            "length": len(formula.encode("utf-16-le")) // 2,
+        }
+        data = {
+            "stringEncoding": "utf16",
+            "contents": [
+                {
+                    "markdown": markdown,
+                    "tables": [self._table(0, 1, ":formula:", span)],
+                }
+            ],
+        }
+        outputs = build_metric_outputs("azure-cu", data, None)
+        self.assertIn("β", outputs["ocr_largest"])
+
     def test_missing_formula_span_drops_placeholder_without_fabrication(self):
         data = {
             "contents": [

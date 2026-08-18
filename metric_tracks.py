@@ -99,6 +99,7 @@ def _table_rank(table: dict[str, Any]) -> tuple[float, int, int, int]:
 
 def _azure_tables(data: dict[str, Any]) -> list[dict[str, Any]]:
     tables: list[dict[str, Any]] = []
+    string_encoding = str(data.get("stringEncoding", "codePoint"))
     for content in data.get("contents", []):
         source_text = str(content.get("markdown", ""))
         for source_table in content.get("tables", []):
@@ -106,8 +107,28 @@ def _azure_tables(data: dict[str, Any]) -> list[dict[str, Any]]:
             table["_source_text"] = source_text
             for cell in table.get("cells", []):
                 cell["_source_text"] = source_text
+                cell["_string_encoding"] = string_encoding
             tables.append(table)
     return tables
+
+
+def _span_text(
+    source: str,
+    offset: int,
+    length: int,
+    string_encoding: str,
+) -> str | None:
+    if string_encoding.lower() in {"utf16", "utf-16", "utf16codeunit"}:
+        encoded = source.encode("utf-16-le")
+        start = offset * 2
+        end = (offset + length) * 2
+        if end > len(encoded):
+            return None
+        try:
+            return encoded[start:end].decode("utf-16-le")
+        except UnicodeDecodeError:
+            return None
+    return source[offset : offset + length] if offset + length <= len(source) else None
 
 
 def _cell_text(cell: dict[str, Any], ocr_adapter: bool) -> str:
@@ -126,8 +147,14 @@ def _cell_text(cell: dict[str, Any], ocr_adapter: bool) -> str:
                 length = max(0, int(span.get("length", 0)))
             except (TypeError, ValueError):
                 continue
-            if source_text and length and offset + length <= len(source_text):
-                resolved_parts.append(source_text[offset : offset + length])
+            resolved = _span_text(
+                source_text,
+                offset,
+                length,
+                str(cell.get("_string_encoding", "codePoint")),
+            )
+            if resolved:
+                resolved_parts.append(resolved)
         resolved = " ".join(resolved_parts).strip()
         if resolved:
             rendered = latex_to_visible_text(resolved)
