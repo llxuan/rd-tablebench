@@ -69,15 +69,12 @@ python benchmark_cli.py run \
 For Azure-hosted Mistral OCR, use `--provider mistral`,
 `--mistral-provider azure`, and `--mistral-model mistral-ocr-4-0`.
 
-The released dataset includes both padded PDFs and tight JPG table crops. Select
-one explicit input contract with `--input-mode pdf|image`. Azure Content
-Understanding receives the matching `application/pdf` or `image/jpeg` content
-type. Mistral uses the OCR API's `image_url` document variant for JPG payloads
-and `document_url` for PDFs. For Mistral's structured table output, add
+The benchmark CLI sends each released padded PDF as `application/pdf`. Mistral
+uses the OCR API's `document_url` variant. For structured table output, add
 `--mistral-table-format html`; the parser consumes ordered
 `pages[].tables[].content` entries because page Markdown contains only table
-placeholders in this mode. Input mode and table format are included in the
-resume configuration identity, so artifacts cannot be reused across contracts.
+placeholders in this mode. Table format is included in the resume configuration
+identity, so incompatible artifacts cannot be reused.
 
 The output root contains `manifest.json`, per-case `raw/`, `outputs/`, and
 `status/` directories, plus `evaluation/results.jsonl`, `failures.jsonl`, and

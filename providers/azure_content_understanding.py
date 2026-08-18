@@ -7,19 +7,9 @@ from pathlib import Path
 from typing import Any
 
 
-def input_content_type(input_mode: str) -> str:
-    if input_mode == "pdf":
-        return "application/pdf"
-    if input_mode == "image":
-        return "image/jpeg"
-    raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
-
-
 def analyze(
     input_path: Path,
     analyzer_id: str,
-    input_mode: str,
-    media_type: str | None = None,
 ) -> dict[str, Any]:
     """Analyze one released PDF or JPG and return the raw response."""
     from azure.ai.contentunderstanding import ContentUnderstandingClient
@@ -36,7 +26,7 @@ def analyze(
     result = client.begin_analyze_binary(
         analyzer_id=analyzer_id,
         binary_input=input_path.read_bytes(),
-        content_type=media_type or input_content_type(input_mode),
+        content_type="application/pdf",
     ).result()
     raw = result.as_dict()
     if not isinstance(raw, dict):

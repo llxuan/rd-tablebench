@@ -49,23 +49,9 @@ def process(
 
 def input_document(
     input_path: Path,
-    input_mode: str,
-    media_type: str | None = None,
 ) -> dict[str, str]:
     encoded = base64.b64encode(input_path.read_bytes()).decode("ascii")
-    if media_type is None:
-        if input_mode == "pdf":
-            media_type = "application/pdf"
-        elif input_mode == "image":
-            media_type = "image/jpeg"
-        else:
-            raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
-    data_url = f"data:{media_type};base64,{encoded}"
-    if media_type.startswith("image/"):
-        return {
-            "type": "image_url",
-            "image_url": data_url,
-        }
+    data_url = f"data:application/pdf;base64,{encoded}"
     return {"type": "document_url", "document_url": data_url}
 
 
@@ -73,9 +59,7 @@ def analyze(
     input_path: Path,
     provider: str,
     model: str,
-    input_mode: str,
     table_format: str,
-    media_type: str | None = None,
 ) -> dict[str, Any]:
     """Analyze one released PDF or JPG and return the raw response."""
     api_key = os.environ.get("MISTRAL_API_KEY")
@@ -100,7 +84,7 @@ def analyze(
     response = process(
         client,
         model,
-        input_document(input_path, input_mode, media_type),
+        input_document(input_path),
         None if table_format == "inline" else table_format,
     )
     raw = response.model_dump(mode="json")

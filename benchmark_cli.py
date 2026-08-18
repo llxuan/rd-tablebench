@@ -40,7 +40,6 @@ from providers.mistral_ocr import analyze as analyze_mistral
 class Case:
     id: str
     pdf: str
-    image: str
     ground_truth: str
     language: str
 
@@ -92,6 +91,9 @@ LEGACY_INFERENCE_REVISIONS = {
     # 119d5a5: raw PDF/JPG provider request code is unchanged by the subsequent
     # input-contract cleanup, so those cached raw responses remain safe.
     "1e39c577da78160e6a8c9731faf7900066cd91beddcdc551d88a5623a13670f3",
+    # 388a4cd: the released-PDF request path is unchanged by removing the JPG
+    # input contract, so its cached raw responses remain safe.
+    "16261bb1a86529144c798d6de37f6cd7e12e6bf8365ad0785611e2f44f52cca8",
 }
 
 
@@ -143,13 +145,12 @@ def _read_cases(dataset_root: Path) -> list[Case]:
             case = Case(
                 id=case_id,
                 pdf=f"pdfs/{pdf_name}",
-                image=f"_images/{case_id}.jpg",
                 ground_truth=f"groundtruth/{case_id}.html",
                 language=row.get("language", "").strip() or "unknown",
             )
             missing = [
                 relative
-                for relative in (case.pdf, case.image, case.ground_truth)
+                for relative in (case.pdf, case.ground_truth)
                 if not (dataset_root / relative).is_file()
             ]
             if missing:
@@ -171,7 +172,6 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
             "provider": args.provider,
             "parallel": args.parallel,
             "analyzer_id": args.analyzer_id,
-            "input_mode": args.input_mode,
             "evaluation_policy": args.evaluation_policy,
         }
     else:
@@ -180,7 +180,6 @@ def _configuration(args: argparse.Namespace) -> dict[str, object]:
             "parallel": args.parallel,
             "mistral_provider": args.mistral_provider,
             "model": args.mistral_model,
-            "input_mode": args.input_mode,
             "table_format": args.mistral_table_format,
             "evaluation_policy": args.evaluation_policy,
         }
@@ -207,33 +206,24 @@ def _validate_environment(args: argparse.Namespace) -> None:
         raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 
-def _provider_media_type(args: argparse.Namespace) -> str:
-    return "application/pdf" if args.input_mode == "pdf" else "image/jpeg"
-
-
 def _provider_input_configuration(args: argparse.Namespace) -> dict[str, object]:
     return {
-        "source_input_mode": args.input_mode,
-        "media_type": _provider_media_type(args),
+        "source_input_mode": "pdf",
+        "media_type": "application/pdf",
     }
 
 
 def _analyzer(args: argparse.Namespace) -> Callable[[Path], dict[str, Any]]:
-    media_type = _provider_media_type(args)
     if args.provider == "azure-cu":
         return lambda path: analyze_azure_cu(
             path,
             args.analyzer_id,
-            args.input_mode,
-            media_type,
         )
     return lambda path: analyze_mistral(
         path,
         args.mistral_provider,
         args.mistral_model,
-        args.input_mode,
         args.mistral_table_format,
-        media_type,
     )
 
 
@@ -241,14 +231,6 @@ def _parser(provider: str) -> Callable[[str], tuple[str | None, Any]]:
     if provider == "azure-cu":
         return parse_azure_content_understanding_response
     return parse_mistral_ocr_response
-
-
-def _case_input(case: Case, input_mode: str) -> str:
-    if input_mode == "pdf":
-        return case.pdf
-    if input_mode == "image":
-        return case.image
-    raise ValueError(f"Unsupported RD-TableBench input mode: {input_mode}")
 
 
 def _error_record(
@@ -267,7 +249,6 @@ def _error_record(
         "status": status,
         "language": case.language,
         "source": source,
-        "preview": case.image,
         "output": None,
         "outputs": {},
         "error": {"type": type(error).__name__, "message": str(error)},
@@ -345,7 +326,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     )
 
     def process(case: Case) -> dict[str, object]:
-        source = _case_input(case, args.input_mode)
+        source = case.pdf
         source_path = dataset_root / source
         ground_truth_path = dataset_root / case.ground_truth
         ground_truth_html = ground_truth_path.read_text(encoding="utf-8")
@@ -363,7 +344,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         input_sha256 = source_sha256
         provider_input = {
             "sha256": input_sha256,
-            "media_type": _provider_media_type(args),
+            "media_type": "application/pdf",
         }
         if raw_path.is_file() and all(
             path.is_file() for path in output_paths.values()
@@ -478,7 +459,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
                 "status": "scored",
                 "language": case.language,
                 "source": source,
-                "preview": case.image,
                 "output": relative_outputs["raw_largest"],
                 "outputs": relative_outputs,
                 "error_analysis": error_analysis,
@@ -654,7 +634,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--output-root", required=True)
     run_parser.add_argument("--provider", choices=("azure-cu", "mistral"), required=True)
     run_parser.add_argument("--parallel", type=int, default=1)
-    run_parser.add_argument("--input-mode", choices=("pdf", "image"), default="pdf")
     run_parser.add_argument(
         "--evaluation-policy",
         choices=(EVALUATION_POLICY,),

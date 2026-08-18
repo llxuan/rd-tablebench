@@ -18,7 +18,6 @@ from parsing import (  # noqa: E402
     parse_azure_content_understanding_response,
     parse_mistral_ocr_response,
 )
-from providers.azure_content_understanding import input_content_type  # noqa: E402
 from providers.mistral_ocr import input_document, process  # noqa: E402
 
 
@@ -108,28 +107,16 @@ class ParsingTests(unittest.TestCase):
             "<table><tr><td>B</td></tr></table>",
         )
 
-    def test_provider_input_contracts(self):
+    def test_mistral_uses_pdf_document_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pdf = root / "case.pdf"
-            image = root / "case.jpg"
-            png = root / "case.png"
             pdf.write_bytes(b"pdf")
-            image.write_bytes(b"jpg")
-            png.write_bytes(b"png")
 
-            pdf_document = input_document(pdf, "pdf")
-            image_document = input_document(image, "image")
-            png_document = input_document(png, "pdf", "image/png")
+            pdf_document = input_document(pdf)
 
-        self.assertEqual(input_content_type("pdf"), "application/pdf")
-        self.assertEqual(input_content_type("image"), "image/jpeg")
         self.assertTrue(pdf_document["document_url"].startswith("data:application/pdf;base64,"))
         self.assertEqual(pdf_document["type"], "document_url")
-        self.assertEqual(image_document["type"], "image_url")
-        self.assertTrue(image_document["image_url"].startswith("data:image/jpeg;base64,"))
-        self.assertEqual(png_document["type"], "image_url")
-        self.assertTrue(png_document["image_url"].startswith("data:image/png;base64,"))
 
     def test_mistral_retries_using_azure_retry_after_ms(self):
         class RateLimitError(RuntimeError):
@@ -157,7 +144,6 @@ class BenchmarkCliTests(unittest.TestCase):
         dataset = root / "dataset"
         for relative, content in {
             "pdfs/case.pdf": b"pdf",
-            "_images/case.jpg": b"jpg",
             "groundtruth/case.html": (
                 b"<table><tr><th>A</th><th>B</th></tr>"
                 b"<tr><td>1</td><td>2</td></tr></table>"
@@ -184,7 +170,6 @@ class BenchmarkCliTests(unittest.TestCase):
             analyzer_id="prebuilt-layout",
             mistral_provider="azure",
             mistral_model="mistral-ocr-4-0",
-            input_mode="pdf",
             mistral_table_format="inline",
             evaluation_policy=benchmark_cli.EVALUATION_POLICY,
         )
@@ -233,42 +218,11 @@ class BenchmarkCliTests(unittest.TestCase):
         )
         self.assertTrue(derived_outputs_exist)
 
-    def test_input_mode_changes_source_and_prevents_cross_mode_resume(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            args = self._args(self._dataset(root), root / "output")
-            raw = {"pages": [{"markdown": "| A | B |\n| --- | --- |\n| 1 | 2 |"}]}
-            with (
-                patch.object(benchmark_cli, "_validate_environment"),
-                patch.object(benchmark_cli, "_analyzer", return_value=lambda _: raw),
-            ):
-                benchmark_cli.run(args)
-
-            args.input_mode = "image"
-            observed: list[Path] = []
-
-            def analyze(path: Path) -> dict[str, object]:
-                observed.append(path)
-                return raw
-
-            with (
-                patch.object(benchmark_cli, "_validate_environment"),
-                patch.object(benchmark_cli, "_analyzer", return_value=analyze),
-            ):
-                benchmark_cli.run(args)
-            result = json.loads(
-                (root / "output/evaluation/results.jsonl").read_text().splitlines()[0]
-            )
-
-        self.assertEqual([path.name for path in observed], ["case.jpg"])
-        self.assertEqual(result["source"], "_images/case.jpg")
-
     def test_multiple_cases_use_process_safe_metric_scoring(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             dataset = self._dataset(root)
             (dataset / "pdfs/case-2.pdf").write_bytes(b"pdf-2")
-            (dataset / "_images/case-2.jpg").write_bytes(b"jpg-2")
             (dataset / "groundtruth/case-2.html").write_text(
                 "<table><tr><th>A</th><th>B</th></tr>"
                 "<tr><td>1</td><td>2</td></tr></table>",
