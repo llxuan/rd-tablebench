@@ -222,6 +222,23 @@ class AzureMetricOutputTests(unittest.TestCase):
         self.assertIn("LOGICAL", outputs["raw_largest"])
         self.assertNotIn("PHYSICAL", outputs["raw_largest"])
 
+    def test_largest_table_tie_preserves_provider_order(self):
+        first = self._table(0, 1, "FIRSTX", right=1)
+        second = self._table(0, 10, "SECOND", right=10)
+        data = {
+            "contents": [
+                {
+                    "markdown": "",
+                    "tables": [first, second],
+                }
+            ]
+        }
+
+        outputs = build_metric_outputs("azure-cu", data, None)
+
+        self.assertIn("FIRSTX", outputs["raw_largest"])
+        self.assertNotIn("SECOND", outputs["raw_largest"])
+
     def test_geometry_concat_merges_vertical_fragments(self):
         data = {
             "contents": [

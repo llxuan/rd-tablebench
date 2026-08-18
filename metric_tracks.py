@@ -81,11 +81,7 @@ def _cell_bbox(cell: dict[str, Any]) -> tuple[float, float, float, float] | None
     return _source_bbox(cell.get("source"))
 
 
-def _table_rank(table: dict[str, Any]) -> tuple[int, int, int, float]:
-    box = _table_bbox(table)
-    geometric_area = (
-        max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1]) if box else 0.0
-    )
+def _table_rank(table: dict[str, Any]) -> tuple[int, int, int]:
     rows = max(0, int(table.get("rowCount", 0)))
     columns = max(0, int(table.get("columnCount", 0)))
     cells = table.get("cells") or []
@@ -93,7 +89,6 @@ def _table_rank(table: dict[str, Any]) -> tuple[int, int, int, float]:
         rows * columns,
         len(cells),
         sum(len(str(cell.get("content", ""))) for cell in cells),
-        geometric_area,
     )
 
 
