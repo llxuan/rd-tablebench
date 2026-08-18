@@ -314,6 +314,15 @@ class BenchmarkCliTests(unittest.TestCase):
             status["inference_revision"] = next(
                 iter(benchmark_cli.LEGACY_INFERENCE_REVISIONS)
             )
+            legacy_provider_configuration = {
+                **benchmark_cli._provider_configuration(args),
+                "input_mode": "pdf",
+            }
+            status["provider_configuration_sha256"] = (
+                benchmark_cli._configuration_sha256(
+                    legacy_provider_configuration
+                )
+            )
             benchmark_cli._write_json(status_path, status)
             with (
                 patch.object(benchmark_cli, "_validate_environment"),

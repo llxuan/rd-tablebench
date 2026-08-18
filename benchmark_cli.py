@@ -88,8 +88,8 @@ LEGACY_INFERENCE_REVISIONS = {
     # 9fa08fd: provider/input code is unchanged; this revision predates only
     # post-evaluation error diagnostics, so its cached raw responses are safe.
     "10cab94cb22d2f3db96aa8887f08d790e1f1713c561f0d1ff631791a1df72ffb",
-    # 119d5a5: raw PDF/JPG provider request code is unchanged by the subsequent
-    # input-contract cleanup, so those cached raw responses remain safe.
+    # 119d5a5: the released-PDF provider request is unchanged by the subsequent
+    # rendered-track cleanup, so its cached raw responses remain safe.
     "1e39c577da78160e6a8c9731faf7900066cd91beddcdc551d88a5623a13670f3",
     # 388a4cd: the released-PDF request path is unchanged by removing the JPG
     # input contract, so its cached raw responses remain safe.
@@ -193,6 +193,25 @@ def _provider_configuration(args: argparse.Namespace) -> dict[str, object]:
     return configuration
 
 
+def _configuration_sha256(configuration: dict[str, object]) -> str:
+    return hashlib.sha256(
+        json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+def _compatible_provider_configuration_sha256s(
+    args: argparse.Namespace,
+) -> set[str]:
+    current = _provider_configuration(args)
+    legacy_pdf = {**current, "input_mode": "pdf"}
+    return {
+        _configuration_sha256(current),
+        _configuration_sha256(legacy_pdf),
+    }
+
+
 def _validate_environment(args: argparse.Namespace) -> None:
     required = (
         ["AZURE_CONTENT_UNDERSTANDING_ENDPOINT", "AZURE_CONTENT_UNDERSTANDING_KEY"]
@@ -284,16 +303,13 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     cases = _read_cases(dataset_root)
     _validate_environment(args)
     configuration = _configuration(args)
-    configuration_sha256 = hashlib.sha256(
-        json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    provider_configuration_sha256 = hashlib.sha256(
-        json.dumps(
-            _provider_configuration(args),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+    configuration_sha256 = _configuration_sha256(configuration)
+    compatible_provider_configuration_sha256s = (
+        _compatible_provider_configuration_sha256s(args)
+    )
+    provider_configuration_sha256 = _configuration_sha256(
+        _provider_configuration(args)
+    )
     raw_dir = output_root / "raw"
     status_dir = output_root / "status"
     evaluation_dir = output_root / "evaluation"
@@ -373,7 +389,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             and status.get("source_sha256") == source_sha256
             and status.get("input_sha256") == input_sha256
             and status.get("provider_configuration_sha256")
-            == provider_configuration_sha256
+            in compatible_provider_configuration_sha256s
             and status.get("inference_revision")
             in {INFERENCE_REVISION, *LEGACY_INFERENCE_REVISIONS}
             and status.get("raw_sha256") == _sha256_file(raw_path)
