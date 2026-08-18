@@ -203,6 +203,25 @@ class AzureMetricOutputTests(unittest.TestCase):
         outputs = build_metric_outputs("azure-cu", data, None)
         self.assertNotIn(":formula:", outputs["ocr_largest"])
 
+    def test_largest_table_prefers_logical_grid_over_geometric_area(self):
+        logical = self._table(0, 1, "LOGICAL", right=1)
+        logical.update({"rowCount": 4, "columnCount": 4})
+        physical = self._table(0, 10, "PHYSICAL", right=10)
+        physical.update({"rowCount": 4, "columnCount": 2})
+        data = {
+            "contents": [
+                {
+                    "markdown": "",
+                    "tables": [physical, logical],
+                }
+            ]
+        }
+
+        outputs = build_metric_outputs("azure-cu", data, None)
+
+        self.assertIn("LOGICAL", outputs["raw_largest"])
+        self.assertNotIn("PHYSICAL", outputs["raw_largest"])
+
     def test_geometry_concat_merges_vertical_fragments(self):
         data = {
             "contents": [
