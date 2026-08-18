@@ -61,7 +61,7 @@ def analyze(
     model: str,
     table_format: str,
 ) -> dict[str, Any]:
-    """Analyze one released PDF or JPG and return the raw response."""
+    """Analyze one released PDF and return the raw response."""
     api_key = os.environ.get("MISTRAL_API_KEY")
     if not api_key:
         raise RuntimeError("MISTRAL_API_KEY is required.")

@@ -11,7 +11,7 @@ def analyze(
     input_path: Path,
     analyzer_id: str,
 ) -> dict[str, Any]:
-    """Analyze one released PDF or JPG and return the raw response."""
+    """Analyze one released PDF and return the raw response."""
     from azure.ai.contentunderstanding import ContentUnderstandingClient
     from azure.core.credentials import AzureKeyCredential
 
