@@ -89,8 +89,8 @@ LEGACY_INFERENCE_REVISIONS = {
     # 9fa08fd: provider/input code is unchanged; this revision predates only
     # post-evaluation error diagnostics, so its cached raw responses are safe.
     "10cab94cb22d2f3db96aa8887f08d790e1f1713c561f0d1ff631791a1df72ffb",
-    # 119d5a5: raw PDF/JPG provider inputs are unchanged by removing the local
-    # PDF-render branch, so those cached raw responses remain safe.
+    # 119d5a5: raw PDF/JPG provider request code is unchanged by the subsequent
+    # input-contract cleanup, so those cached raw responses remain safe.
     "1e39c577da78160e6a8c9731faf7900066cd91beddcdc551d88a5623a13670f3",
 }
 
