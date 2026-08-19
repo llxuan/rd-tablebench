@@ -59,6 +59,18 @@ After cell-level scores are computed, entire rows are aligned using a second Nee
 
 Before comparison, all cell content is normalized by stripping whitespace, newlines, and hyphens. The final similarity score is a value between `0` and `1`, where `1` represents a perfect structural and content match.
 
+### Provider Response Parsing
+
+`parsing.py` converts Azure Content Understanding raw responses into the
+logically largest RD-TableBench-compatible HTML table without using ground
+truth.
+
+```python
+from parsing import parse_azure_content_understanding_response
+
+azure_html, azure_raw = parse_azure_content_understanding_response(raw_path)
+```
+
 ### Table Representation
 
 Tables are represented as 2D string arrays. Merged cells (via HTML `rowspan`/`colspan`) are expanded by repeating their values across every cell they occupy, ensuring consistent dimensionality for alignment.
@@ -145,11 +157,10 @@ score = table_similarity(ground_truth, predicted)
 ### Parsing Provider Responses
 
 ```python
-from parsing import parse_reducto_response, parse_textract_response
+from parsing import parse_azure_content_understanding_response
 
 # Each parser extracts the HTML table from a provider's response format
-html_table = parse_reducto_response(response_json)
-html_table = parse_textract_response(response_json)
+azure_table, azure_raw = parse_azure_content_understanding_response(raw_path)
 ```
 
 ## Results and Dataset

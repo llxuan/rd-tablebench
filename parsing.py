@@ -2,9 +2,45 @@
 For each format, this code extracts the largest HTML table from the response.
 """
 
+from html import escape
 import json
 from typing import Any
 import os
+
+
+def _content_understanding_table_to_html(table: dict[str, Any]) -> str:
+    rows: list[list[str]] = [[] for _ in range(table["rowCount"])]
+    for cell in table["cells"]:
+        tag = "th" if "header" in cell.get("kind", "").lower() else "td"
+        attributes = ""
+        for attribute, key in (("rowspan", "rowSpan"), ("colspan", "columnSpan")):
+            if cell.get(key, 1) > 1:
+                attributes += f' {attribute}="{cell[key]}"'
+        content = escape(cell.get("content", "").replace("\n", " "))
+        rows[cell["rowIndex"]].append(f"<{tag}{attributes}>{content}</{tag}>")
+    return "<table>" + "".join(
+        "<tr>" + "".join(row) + "</tr>" for row in rows
+    ) + "</table>"
+
+
+def parse_azure_content_understanding_response(path: str) -> tuple[str | None, Any]:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+    payload = data.get("analyzeResult") or data
+    tables = [
+        table
+        for content in payload.get("contents", [])
+        for table in content.get("tables", [])
+    ]
+    largest = max(
+        tables,
+        key=lambda table: table["rowCount"] * table["columnCount"],
+        default=None,
+    )
+    return (
+        _content_understanding_table_to_html(largest) if largest else None,
+        data,
+    )
 
 
 def parse_textract_response(path: str) -> tuple[str | None, Any]:

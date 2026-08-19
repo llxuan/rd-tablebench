@@ -29,6 +29,7 @@ The following providers are included as baselines for comparison. Each script in
 | Provider | File | Auth Environment Variables |
 |---|---|---|
 | Azure Document Intelligence | `azure_docintelligence.py` | `AZURE_ENDPOINT`, `AZURE_KEY` |
+| Azure Content Understanding | `azure_content_understanding.py` | `AZURE_CONTENT_UNDERSTANDING_ENDPOINT`, `AZURE_CONTENT_UNDERSTANDING_KEY` |
 | AWS Textract | `textract.py` | AWS credentials (boto3 default chain) |
 | GPT-4o | `gpt4o.py` | `OPENAI_API_KEY` |
 | Google Cloud Document AI | `gcloud.py` | `GCP_PROJECT_ID`, `GCP_PROCESSOR_ID` |
@@ -36,6 +37,10 @@ The following providers are included as baselines for comparison. Each script in
 | Chunkr | `chunkr.py` | `CHUNKR_API_KEY` |
 
 Each baseline script follows a similar pattern: read PDFs from the dataset directory, call the provider API with rate-limit handling, and write JSON responses to a provider-specific output directory. See individual files for provider-specific configuration details.
+
+`azure_content_understanding.py` exposes an `analyze` function for runners. It
+sends one PDF to the selected analyzer and returns the SDK response as a raw JSON
+object; response persistence remains the caller's responsibility.
 
 ## Adding a New Provider
 
