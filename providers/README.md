@@ -30,6 +30,7 @@ The following providers are included as baselines for comparison. Each script in
 |---|---|---|
 | Azure Document Intelligence | `azure_docintelligence.py` | `AZURE_ENDPOINT`, `AZURE_KEY` |
 | Azure Content Understanding | `azure_content_understanding.py` | `AZURE_CONTENT_UNDERSTANDING_ENDPOINT`, `AZURE_CONTENT_UNDERSTANDING_KEY` |
+| Mistral OCR (Azure) | `mistral_ocr.py` | `MISTRAL_API_ENDPOINT`, `MISTRAL_API_KEY` |
 | AWS Textract | `textract.py` | AWS credentials (boto3 default chain) |
 | GPT-4o | `gpt4o.py` | `OPENAI_API_KEY` |
 | Google Cloud Document AI | `gcloud.py` | `GCP_PROJECT_ID`, `GCP_PROCESSOR_ID` |
@@ -41,6 +42,11 @@ Each baseline script follows a similar pattern: read PDFs from the dataset direc
 `azure_content_understanding.py` exposes an `analyze` function for runners. It
 sends one PDF to the selected analyzer and returns the SDK response as a raw JSON
 object; response persistence remains the caller's responsibility.
+
+`mistral_ocr.py` exposes an `analyze` function for Azure-hosted Mistral OCR. It
+sends one PDF as a data URL, always requests HTML table output, and returns the
+SDK response as a raw JSON object. Set `MISTRAL_TIMEOUT_MS` to override the
+default 180-second request timeout.
 
 ## Adding a New Provider
 

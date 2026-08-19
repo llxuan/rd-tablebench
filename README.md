@@ -61,14 +61,19 @@ Before comparison, all cell content is normalized by stripping whitespace, newli
 
 ### Provider Response Parsing
 
-`parsing.py` converts Azure Content Understanding raw responses into the
-logically largest RD-TableBench-compatible HTML table without using ground
-truth.
+`parsing.py` owns provider raw-response to HTML conversion. The Azure Content
+Understanding and Mistral OCR parsers select the logically largest raw table and
+return one RD-TableBench-compatible HTML table. Selection is ground-truth blind
+and does not merge tables or apply OCR text repair.
 
 ```python
-from parsing import parse_azure_content_understanding_response
+from parsing import (
+    parse_azure_content_understanding_response,
+    parse_mistral_ocr_response,
+)
 
 azure_html, azure_raw = parse_azure_content_understanding_response(raw_path)
+mistral_html, mistral_raw = parse_mistral_ocr_response(raw_path)
 ```
 
 ### Table Representation
@@ -157,10 +162,14 @@ score = table_similarity(ground_truth, predicted)
 ### Parsing Provider Responses
 
 ```python
-from parsing import parse_azure_content_understanding_response
+from parsing import (
+    parse_azure_content_understanding_response,
+    parse_mistral_ocr_response,
+)
 
 # Each parser extracts the HTML table from a provider's response format
 azure_table, azure_raw = parse_azure_content_understanding_response(raw_path)
+mistral_table, mistral_raw = parse_mistral_ocr_response(raw_path)
 ```
 
 ## Results and Dataset
